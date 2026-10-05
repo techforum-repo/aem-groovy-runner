@@ -9,7 +9,8 @@ import streamlit as st
 from .. import auth, database, formatter_links, formatters, jobs, readonly, runner, settings_store
 from ..groovy_script import build_script
 from ..logging_setup import get_logger
-from ..scripts_registry import InputDef, ScriptDef, discover, expand_runs, validate, validate_batch
+from ..scripts_registry import (InputDef, ScriptDef, discover, expand_runs, validate, validate_skips,
+                                with_skips)
 from ..utils import split_lines, split_paths
 from .shared import (audit_event, download_button, get_client, is_auth_rejection, is_mock, multi_download_button,
                      render_friendly_error, sign_out_rejected)
@@ -163,20 +164,50 @@ def _formatter_name(formatter_id: str) -> str:
 
 
 def _execute(script: ScriptDef, values: dict[str, Any], *, formatter_id: str | None,
-             only_labels: list[str] | None = None, batch: dict[str, Any] | None = None) -> None:
+             only_labels: list[str] | None = None, batch: dict[str, Any] | None = None,
+             lineage: list[str] | None = None) -> None:
     """Start the batch in the background; the progress panel takes it from here."""
     total = len([r for r in expand_runs(script, values) if only_labels is None or r[0] in only_labels])
+    # A batch Retry rebuilds each entered path's combined file from the earlier successes of THE SAME batch
+    # (and its earlier retries) plus the retried roots. A fresh run never borrows results from other runs.
+    prior = ([f for f in st.session_state["session_files"] if f.ok and f.batch_id in lineage]
+             if batch and lineage else None)
     st.session_state["run_job"] = jobs.start(
         get_client(), script, values, session_id=st.session_state["session_id"], formatter_id=formatter_id,
-        only_labels=only_labels, total=total, batch=batch)
+        only_labels=only_labels, total=total, batch=batch, prior_results=prior, lineage=lineage)
 
 
-def _batch_settings(script: ScriptDef) -> dict[str, Any] | None:
-    """The batch options from the form, or None when batching is off."""
+def _skips(script: ScriptDef) -> list[str]:
+    """The system areas to skip for this run (empty when switched off)."""
+    if script.system_excludes is None or not st.session_state.get(f"skip_on:{script.id}", True):
+        return []
+    return split_paths(st.session_state.get(f"skip_list:{script.id}", ""))
+
+
+def _render_skip_controls(script: ScriptDef) -> None:
+    se = script.system_excludes
+    if se is None:
+        return
+    st.session_state.setdefault(f"skip_list:{script.id}", "\n".join(se.paths))
+    count = len(split_paths(st.session_state[f"skip_list:{script.id}"]))
+    on = st.checkbox(f"Skip AEM system areas ({count})", value=True, key=f"skip_on:{script.id}",
+                     help="Applied to every run, batch or not: merged into this script's excluded paths, so these "
+                          "areas aren't queried or walked. With Batch, they're also skipped during discovery.")
+    if on:
+        with st.expander("Edit the skipped system areas"):
+            st.text_area("One per line", key=f"skip_list:{script.id}", height=150, label_visibility="collapsed")
+            if st.button("Restore defaults", key=f"skip_reset:{script.id}"):
+                st.session_state[f"skip_list:{script.id}"] = "\n".join(se.paths)
+                st.rerun()
+
+
+def _batch_settings(script: ScriptDef, values: dict[str, Any]) -> dict[str, Any] | None:
+    """The batch options, or None when batching is off. Discovery skips = the
+    script's excluded paths for this run (user's + system areas)."""
     if script.batch is None or not st.session_state.get(f"batch_on:{script.id}"):
         return None
-    return {"excludes": split_paths(st.session_state.get(f"batch_excl:{script.id}", "")),
-            "levels": int(st.session_state.get(f"batch_levels:{script.id}", 1) or 1)}
+    excluded = values.get(script.system_excludes.input, []) if script.system_excludes else []
+    return {"excludes": list(excluded), "levels": int(st.session_state.get(f"batch_levels:{script.id}", 1) or 1)}
 
 
 def _render_batch_controls(script: ScriptDef) -> None:
@@ -184,25 +215,21 @@ def _render_batch_controls(script: ScriptDef) -> None:
     if b is None:
         return
     what = "site / page roots" if b.kind == "page" else "top-level folders"
-    st.session_state.setdefault(f"batch_excl:{script.id}", "\n".join(b.default_excludes))
     on = st.checkbox(b.label or f"Batch: run each of the {what} under the entered path(s) as its own run",
                      key=f"batch_on:{script.id}",
                      help="For whole-repository runs (e.g. /content or /content/dam): the roots are discovered first "
                           "with one small read-only request, then the script runs once per root: small requests, live "
-                          "progress, cancel and retry per root, one file each (combine them in the Format step).")
+                          "progress, cancel and retry per root. You still get ONE file per entered path: the roots' "
+                          "results are combined automatically (rebuilt after a Retry). Excluded paths and skipped "
+                          "system areas are skipped during discovery too.")
     if on:
-        c1, c2 = st.columns([3, 1])
-        with c1:
-            st.text_area("Skip these during discovery (defaults: system areas) — one per line",
-                         key=f"batch_excl:{script.id}", height=110)
-        with c2:
-            st.number_input("Levels below the entered path", min_value=1, max_value=3, value=1, step=1,
-                            key=f"batch_levels:{script.id}",
-                            help="1 = direct children (e.g. each site under /content). 2 = one level deeper, for "
-                                 "when a single top-level root is itself too big.")
-        if st.button("Restore default skips", key=f"batch_reset:{script.id}"):
-            st.session_state[f"batch_excl:{script.id}"] = "\n".join(b.default_excludes)
-            st.rerun()
+        st.number_input("Levels below the entered path", min_value=1, max_value=3, value=1, step=1,
+                        key=f"batch_levels:{script.id}",
+                        help="Where the work is split into separate runs. 1 = each direct child (e.g. each site under "
+                             "/content, each top-level DAM folder). 2 = one run per child of those, for when one "
+                             "top-level folder is itself too big. At 2+, anything sitting directly in the level-1 "
+                             "folders (e.g. a site's home page, or assets next to the subfolders) isn't in any "
+                             "run; the note after the run lists it.")
 
 
 def _job_active() -> bool:
@@ -236,12 +263,19 @@ def _finalize(job: jobs.RunJob) -> None:
         if d.skipped:
             note += f"; skipped {len(d.skipped)}: " + ", ".join(f"`{p}`" for p in d.skipped[:8]) + ("…" if len(d.skipped) > 8 else "")
         if d.loose_items:
-            note += (f". ⚠️ {d.loose_items} item(s) sit directly in `{d.root}` (not in any discovered root), so the "
-                     "batch doesn't cover them; run that path without batching to include them.")
+            examples = ", ".join(f"`{p}`" for p in d.loose_paths[:5]) + ("…" if d.loose_items > 5 else "")
+            note += (f". ⚠️ {d.loose_items} item(s) are outside every discovered root (they sit in `{d.root}` or a "
+                     f"folder/page above the root level), so the batch doesn't cover them: {examples}. Lower "
+                     "“Levels”, or run those paths without batching, to include them.")
         messages.append(("info", note))
     st.session_state["session_files"].extend(job.results)
+    outputs = st.session_state.setdefault("combined_outputs", {})
+    for root, path in job.combined:  # keyed by entered path: a rebuilt file (after Retry) replaces the earlier one
+        outputs[(job.script_id, root)] = path
+    batch_id = job.results[0].batch_id if job.results else ""
     st.session_state["last_run"] = {"script_id": job.script_id, "values": job.values, "formatter_id": job.formatter_id,
-                                    "batch": job.batch, "batch_id": job.results[0].batch_id if job.results else ""}
+                                    "batch": job.batch, "batch_id": batch_id,
+                                    "lineage": [*job.lineage, batch_id] if job.batch else []}
     st.session_state["format_selection"] = [f.run_id for f in job.results if f.ok]
     st.session_state["_run_messages"] = messages
     if not is_mock() and any(f.exception is not None and is_auth_rejection(f.exception) for f in job.results):
@@ -266,6 +300,8 @@ def _render_job_panel() -> None:
             text = job.current[0].upper() + job.current[1:] + "…"
         elif job.current == "formatting":
             text = f"Formatting {job.finished} result(s)…"
+        elif job.current.startswith("combining"):
+            text = job.current[0].upper() + job.current[1:] + "…"
         else:
             text = f"Running {min(job.finished + 1, job.total)}/{job.total}: {job.current or 'starting'}"
         st.progress(fraction, text=f"{job.script_name}: {text}  ·  {job.elapsed:.0f}s")
@@ -312,7 +348,8 @@ def _render_session_files(scripts: dict[str, ScriptDef], links: dict[str, tuple[
                    else f"Retry {len(retryable)} failed/cancelled run(s)")
     if retryable and last["script_id"] in scripts and st.button(retry_label, disabled=_job_active()):
         _execute(scripts[last["script_id"]], last["values"], formatter_id=last.get("formatter_id"),
-                 only_labels=None if discovery_failed else [f.label for f in retryable], batch=last.get("batch"))
+                 only_labels=None if discovery_failed else [f.label for f in retryable], batch=last.get("batch"),
+                 lineage=last.get("lineage"))
         st.rerun()
 
     st.dataframe(pd.DataFrame([{
@@ -322,6 +359,13 @@ def _render_session_files(scripts: dict[str, ScriptDef], links: dict[str, tuple[
         "Formatter used": ", ".join(_formatter_name(fid) for fid in f.outputs) or "— (JSON only)",
         "Run ID": f.run_id, "AEM user": f.aem_user,
     } for f in reversed(files)]), width="stretch", hide_index=True)
+
+    combined_files = [p for p in st.session_state.get("combined_outputs", {}).values() if Path(p).exists()]
+    if combined_files:
+        st.markdown("##### Combined files (one per entered path)")
+        for p in reversed(combined_files):
+            download_button(f"⬇️ {Path(p).name}", lambda p=p: Path(p).read_bytes(), Path(p).name, XLSX_MIME,
+                            source_paths=[p], key=f"dl_combined:{p}")
 
     ok = [f for f in files if f.ok]
     if not ok:
@@ -345,7 +389,7 @@ def _render_session_files(scripts: dict[str, ScriptDef], links: dict[str, tuple[
         if st.button(f"Combine {len(selected)} results into one {formatter.name} file", type="primary"):
             try:
                 path = runner.format_combined(selected, formatter_id, st.session_state["session_id"])
-                st.session_state.setdefault("combined_outputs", []).append(path)
+                st.session_state.setdefault("combined_outputs", {})[("manual", path)] = path
                 st.session_state["_format_messages"] = [("success", f"Combined {len(selected)} results into {Path(path).name}.")]
             except Exception as exc:
                 st.session_state["_format_messages"] = [("warning", f"Not combined: {exc}")]
@@ -366,13 +410,6 @@ def _render_session_files(scripts: dict[str, ScriptDef], links: dict[str, tuple[
     for kind, text in st.session_state.pop("_format_messages", []):
         (st.success if kind == "success" else st.warning)(text)
 
-    combined_files = [p for p in st.session_state.get("combined_outputs", []) if Path(p).exists()]
-    if combined_files:
-        st.markdown("##### Combined files")
-        for p in reversed(combined_files):
-            download_button(f"⬇️ {Path(p).name}", lambda p=p: Path(p).read_bytes(), Path(p).name, XLSX_MIME,
-                            source_paths=[p], key=f"dl_combined:{p}")
-
     if selected:
         paths = [p for f in selected for p in [f.json_path, f.executed_script_path, *f.outputs.values()] if p]
         excel = [p for f in selected for p in f.outputs.values() if Path(p).exists()]
@@ -383,14 +420,14 @@ def _render_session_files(scripts: dict[str, ScriptDef], links: dict[str, tuple[
         c1, c2 = st.columns(2)
         with c1:
             download_button("⬇️ Download selected (.zip: json + formatted + executed script)",
-                            lambda: runner.zip_files(paths),
+                            lambda paths=list(paths): runner.zip_files(paths),
                             f"groovy-runner-{st.session_state['session_id']}.zip", "application/zip",
                             source_paths=paths, width="stretch")
         with c2:
             singles = [p for f in selected for p in f.outputs.values() if Path(p).exists()]
             if singles:
                 one = st.selectbox("Single file", singles, format_func=lambda p: Path(p).name, label_visibility="collapsed")
-                download_button(f"⬇️ {Path(one).name}", lambda: Path(one).read_bytes(), Path(one).name, XLSX_MIME,
+                download_button(f"⬇️ {Path(one).name}", lambda one=one: Path(one).read_bytes(), Path(one).name, XLSX_MIME,
                                 source_paths=[one], width="stretch")
 
         st.markdown("#### Preview")
@@ -432,16 +469,15 @@ def render() -> None:
             with st.expander("Advanced options"):
                 for inp in advanced:
                     _render_input(script, inp)
+        _render_skip_controls(script)
         _render_batch_controls(script)
         _render_save_preset(script)
     else:
         st.info("This script takes no inputs.")
 
-    values = _values(script)
-    errors = validate(script, values)
-    batch_now = _batch_settings(script)
-    if batch_now is not None:
-        errors += validate_batch(script, batch_now["excludes"])
+    skips = _skips(script)
+    errors = validate(script, _values(script)) + validate_skips(script, skips)
+    values = with_skips(script, _values(script), skips)  # what is sent and audited
     if not is_mock() and not (settings_store.get("aem_author_url") and auth.is_signed_in(st.session_state.get("user_token"))):
         errors.append("Not connected to AEM: set the author URL (Settings) and sign in with your account (sidebar)")
     runs = expand_runs(script, values) if not script.problems else []
@@ -464,7 +500,7 @@ def render() -> None:
             st.caption("⚠️ No formatter linked to this script yet: using Generic Excel. Link one on the Formatters page.")
     with c1:
         st.write("")
-        batch = _batch_settings(script)
+        batch = _batch_settings(script, values)
         label = (f"▶️ Discover & run ({len(runs)} path{'s' if len(runs) != 1 else ''})" if batch
                  else f"▶️ Run ({len(runs)} run{'s' if len(runs) != 1 else ''})")
         clicked = st.button(label, type="primary", disabled=bool(errors) or not runs or _job_active(), width="stretch")
@@ -480,7 +516,7 @@ def render() -> None:
 
     if clicked and not _job_active():
         _execute(script, values, formatter_id=None if formatter_choice == NO_FORMAT else formatter_choice,
-                 batch=_batch_settings(script))
+                 batch=_batch_settings(script, values))
         st.rerun()  # redraw with Run disabled and the progress panel showing
 
     if st.session_state.get("run_job") is not None:

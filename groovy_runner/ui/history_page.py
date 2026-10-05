@@ -31,4 +31,23 @@ def render() -> None:
         run, path = st.selectbox("Download a file", files,
                                  format_func=lambda rp: f"{rp[0]['created_at']} · {rp[0]['script_id']} · {Path(rp[1]).name}")
         p = Path(path)
-        download_button(f"⬇️ {p.name}", lambda: p.read_bytes(), p.name, source_paths=[str(p)])
+        download_button(f"⬇️ {p.name}", lambda p=p: p.read_bytes(), p.name, source_paths=[str(p)])
+
+    combined = []
+    for event in database.list_audit():
+        if event["action"] != "format.combined":
+            continue
+        details = json.loads(event["details_json"] or "{}")
+        path = details.get("output", "")
+        if path and Path(path).exists():
+            combined.append((event, details, path))
+    if combined:
+        st.markdown("#### Combined files")
+        st.caption("Batch results combined into one file per entered path, and files combined in the Format step.")
+        event, details, path = st.selectbox(
+            "Combined file", combined,
+            format_func=lambda c: f"{c[0]['created_at']} · {Path(c[2]).name} · {c[1].get('rows', '?')} rows "
+                                  f"from {len(c[1].get('sources', []))} result(s)")
+        p = Path(path)
+        download_button(f"⬇️ {p.name}", lambda p=p: p.read_bytes(), p.name, source_paths=[str(p)], key="dl_history_combined")
+

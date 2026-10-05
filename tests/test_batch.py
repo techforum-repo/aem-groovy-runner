@@ -36,7 +36,7 @@ def test_batch_discovers_sites_and_runs_one_per_root(isolated):
     script = _script("page-report")
     found = []
     results = runner.run_script(MockGroovyConsoleClient(), script, {"rootPath": ["/content"]}, session_id="S",
-                                batch={"excludes": list(script.batch.default_excludes), "levels": 1},
+                                batch={"excludes": list(script.system_excludes.paths), "levels": 1},
                                 on_discovered=found.extend)
     assert [r.label for r in results] == ["/content/acme", "/content/acme-corporate", "/content/acme-careers"]
     assert all(r.ok for r in results)
@@ -84,8 +84,9 @@ def test_ui_batch_run_and_combine(isolated):
     at = AppTest.from_file(APP, default_timeout=60).run()
     at.selectbox(key="script_id").set_value("assets-by-type").run()
     at.text_area(key="in:assets-by-type:rootPath").set_value("/content/dam").run()
+    assert at.checkbox(key="skip_on:assets-by-type").value is True  # system areas skipped by default, batch or not
+    assert "/content/dam/projects" in at.text_area(key="skip_list:assets-by-type").value
     at.checkbox(key="batch_on:assets-by-type").check().run()
-    assert "/content/dam/projects" in at.text_area(key="batch_excl:assets-by-type").value
     button = [b for b in at.button if b.label.startswith("▶️")][0]
     assert button.label == "▶️ Discover & run (1 path)"
     button.click().run()
@@ -96,8 +97,174 @@ def test_ui_batch_run_and_combine(isolated):
         at.run()
     table = at.dataframe[0].value
     assert sorted(table["Input"]) == ["/content/dam/acme", "/content/dam/acme-campaigns", "/content/dam/acme-legal"]
-    assert any("Discovered 3 root(s) under `/content/dam`" in i.value and "directly in" in i.value for i in at.info)
-    at.checkbox(key="format_combine").check().run()
-    [b for b in at.button if b.label.startswith("Combine 3 results")][0].click().run()
-    assert any("Combined 3 results into combined_assets-by-type_3-results_" in s.value for s in at.success)
-    assert any(b.label.startswith("⬇️ combined_assets-by-type") for b in at.get("download_button"))
+    assert set(table["Formatter used"]) == {"— (JSON only)"}  # no per-root Excel files in batch mode
+    assert any("Discovered 3 root(s) under `/content/dam`" in i.value and "outside every discovered root" in i.value
+               and "`/content/dam/readme.pdf`" in i.value for i in at.info)
+    assert any("One file for `/content/dam`: combined 3 root(s)" in s.value for s in at.success)
+    downloads = [b.label for b in at.get("download_button") if b.label.startswith("⬇️ dam_all-3-roots_")]
+    assert len(downloads) == 1 and downloads[0].endswith(".generic-excel.xlsx")
+
+
+def _start_job(script, values, batch, prior=None, client=None):
+    from groovy_runner import jobs
+    job = jobs.start(client or MockGroovyConsoleClient(), script, values, session_id="S", formatter_id="generic-excel",
+                     total=1, batch=batch, prior_results=prior)
+    job.thread.join(30)
+    assert job.done and job.error is None
+    return job
+
+
+def test_batch_gives_one_combined_file_per_entered_path(isolated):
+    script = _script("page-report")
+    job = _start_job(script, {"rootPath": ["/content", "/content/x"]}, {"excludes": [], "levels": 1})
+    assert len(job.combined) == 2  # one per entered path, each from its 3+ discovered sites
+    by_name = {Path(p).name.split("_all-")[0]: p for _, p in job.combined}  # same short names as other outputs
+    assert {root for root, _ in job.combined} == {"/content", "/content/x"}  # keyed by entered path
+    assert set(by_name) == {"content", "x"}
+    content_roots = next(d.children for d in job.discoveries if d.root == "/content")
+    rows = openpyxl.load_workbook(by_name["content"]).active.max_row - 1
+    assert rows == sum(r.row_count for r in job.results if r.label in content_roots)  # every root's rows, one file
+    assert all(not r.outputs for r in job.results)  # no per-root Excel
+
+
+def test_retry_rebuilds_the_combined_file_with_the_retried_roots(isolated):
+    script = _script("page-report")
+
+    class FlakyOnCareers(MockGroovyConsoleClient):
+        def run_script(self, script_text):
+            from groovy_runner.groovy_script import extract_config
+            if extract_config(script_text).get("rootPath") == "/content/acme-careers":
+                raise RuntimeError("AEM returned HTTP 503: busy")
+            return super().run_script(script_text)
+
+    first = _start_job(script, {"rootPath": ["/content"]}, {"excludes": [], "levels": 1}, client=FlakyOnCareers())
+    assert any("1 root(s) not included" in t for _, t in first.messages)
+    first_rows = openpyxl.load_workbook(first.combined[0][1]).active.max_row - 1
+
+    retry = _start_job(script, {"rootPath": ["/content"]}, {"excludes": [], "levels": 1},
+                       prior=[r for r in first.results if r.ok])
+    assert not any("not included" in t for _, t in retry.messages)
+    assert openpyxl.load_workbook(retry.combined[0][1]).active.max_row - 1 > first_rows
+
+
+def test_too_big_to_combine_falls_back_to_one_file_per_root(isolated, monkeypatch):
+    monkeypatch.setattr(base, "EXCEL_MAX_DATA_ROWS", 5)
+    script = _script("page-report")
+
+    class FewRows(MockGroovyConsoleClient):  # each root small enough alone, too many rows together
+        def run_script(self, script_text):
+            from groovy_runner.groovy_script import extract_config
+            config = extract_config(script_text)
+            if "kind" in config:
+                return super().run_script(script_text)
+            import json
+            from groovy_runner.clients.groovy_console import GroovyResult
+            from groovy_runner.groovy_script import JSON_END, JSON_START
+            rows = [{"Path": f"{config['rootPath']}/p{i}"} for i in range(3)]
+            return GroovyResult(output=f"{JSON_START}\n{json.dumps({'rows': rows})}\n{JSON_END}", result="",
+                                exception="", running_time="1")
+
+    job = _start_job(script, {"rootPath": ["/content"]}, {"excludes": [], "levels": 1}, client=FewRows())
+    assert job.combined == []
+    assert all("generic-excel" in r.outputs for r in job.results if r.ok)
+    assert any("couldn't combine into one file" in t for _, t in job.messages)
+
+
+def test_ui_skips_apply_without_batch_and_can_be_switched_off(isolated):
+    at = AppTest.from_file(APP, default_timeout=60).run()
+    at.selectbox(key="script_id").set_value("assets-by-type").run()
+    at.text_area(key="in:assets-by-type:rootPath").set_value("/content/dam").run()
+    at.text_area(key="in:assets-by-type:excludedFolders").set_value("/content/dam/acme/archive").run()
+
+    def sent_config():
+        from groovy_runner.groovy_script import extract_config
+        code = [c.value for c in at.code if "__gr_guard" in c.value][0]  # "script exactly as sent" preview
+        return extract_config(code)
+
+    assert sent_config()["excludedFolders"][:2] == ["/content/dam/acme/archive", "/content/dam/projects"]
+    at.checkbox(key="skip_on:assets-by-type").uncheck().run()
+    assert sent_config()["excludedFolders"] == ["/content/dam/acme/archive"]
+    at.checkbox(key="skip_on:assets-by-type").check().run()
+    at.text_area(key="skip_list:assets-by-type").set_value("/content/projects").run()
+    assert [b for b in at.button if b.label.startswith("▶️")][0].disabled
+    assert any("Skipped system areas must start with /content/dam" in c.value for c in at.caption)
+
+
+def _wait(at):
+    for _ in range(60):
+        if "run_job" not in at.session_state:
+            return
+        time.sleep(0.25)
+        at.run()
+
+
+def test_fresh_batch_never_borrows_results_from_an_earlier_run(isolated, monkeypatch):
+    """Review fix: a new batch whose root fails must not fill the gap with an
+    older result of that root (possibly run with different inputs)."""
+    at = AppTest.from_file(APP, default_timeout=60).run()
+    at.selectbox(key="script_id").set_value("assets-by-type").run()
+    at.text_area(key="in:assets-by-type:rootPath").set_value("/content/dam").run()
+    at.checkbox(key="batch_on:assets-by-type").check().run()
+    [b for b in at.button if b.label.startswith("▶️")][0].click().run()
+    _wait(at)
+    assert any("combined 3 root(s)" in s.value for s in at.success)
+
+    original = MockGroovyConsoleClient.run_script
+
+    def fail_legal(self, script_text):
+        from groovy_runner.groovy_script import extract_config
+        if extract_config(script_text).get("rootPath") == "/content/dam/acme-legal":
+            raise RuntimeError("AEM returned HTTP 503: busy")
+        return original(self, script_text)
+    monkeypatch.setattr(MockGroovyConsoleClient, "run_script", fail_legal)
+    at.selectbox(key="in:assets-by-type:mode").set_value("list").run()  # different inputs this time
+    [b for b in at.button if b.label.startswith("▶️")][0].click().run()
+    _wait(at)
+    warning = [w.value for w in at.warning if "One file for `/content/dam`" in w.value]
+    assert warning and "combined 2 root(s)" in warning[0] and "1 root(s) not included" in warning[0]
+
+    monkeypatch.setattr(MockGroovyConsoleClient, "run_script", original)
+    [b for b in at.button if b.label.startswith("Retry")][0].click().run()  # same batch: may reuse its own successes
+    _wait(at)
+    assert any("combined 3 root(s)" in s.value for s in at.success)
+    combined = [b.label for b in at.get("download_button") if b.label.startswith("⬇️ dam_all-")]
+    assert len(combined) == 1  # the rebuilt file replaced the partial one for /content/dam
+
+
+def test_history_lists_combined_files_and_each_button_downloads_its_own_file(isolated):
+    at = AppTest.from_file(APP, default_timeout=60).run()
+    at.selectbox(key="script_id").set_value("page-report").run()
+    at.text_area(key="in:page-report:rootPath").set_value("/content").run()
+    at.checkbox(key="batch_on:page-report").check().run()
+    [b for b in at.button if b.label.startswith("▶️")][0].click().run()
+    _wait(at)
+    at.sidebar.radio[0].set_value("History").run()
+    assert not at.exception, at.exception
+    labels = [b.label for b in at.get("download_button")]
+    assert any(l.startswith("⬇️ content_all-") for l in labels)
+    # Each button must serve ITS file. Capture the lazy data functions at render time, then call them later,
+    # which is exactly when late-binding closures would hand back the wrong (last-assigned) file.
+    import streamlit as st
+    captured = []
+    real = st.download_button
+
+    def spy(label, data, file_name=None, *args, **kwargs):
+        captured.append((file_name, data))
+        return real(label, data, file_name, *args, **kwargs)
+    st.download_button = spy
+    try:
+        at.run()
+    finally:
+        st.download_button = real
+    by_name = {}
+    for event in database.list_audit():
+        if event["action"] == "format.combined":
+            out = __import__("json").loads(event["details_json"])["output"]
+            by_name[Path(out).name] = out
+    for run in database.list_runs():
+        for p in (run["json_path"], run["executed_script_path"]):
+            if p:
+                by_name[Path(p).name] = p
+    assert len(captured) >= 2
+    for file_name, data in captured:
+        assert data() == Path(by_name[file_name]).read_bytes(), file_name

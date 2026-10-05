@@ -58,8 +58,16 @@ class BatchDef:
     script once per root. `input` is the iterate input the roots replace."""
     input: str
     kind: str  # "page" (child pages, e.g. sites) | "folder" (child folders, e.g. DAM folders)
-    default_excludes: tuple[str, ...] = ()
     label: str = ""
+
+
+@dataclass(frozen=True)
+class SystemExcludes:
+    """Manifest "systemExcludes": AEM system areas skipped on every run, batch or
+    not. Merged into the script's own exclusion input (`input`, a path_list) at
+    run time, and used as discovery skips when batching."""
+    input: str
+    paths: tuple[str, ...] = ()
 
 
 @dataclass
@@ -71,6 +79,7 @@ class ScriptDef:
     inputs: list[InputDef] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
     batch: BatchDef | None = None
+    system_excludes: SystemExcludes | None = None
     # Only kept to seed formatter_links.json the first time (migration); not used otherwise.
     legacy_manifest_formatters: list[str] = field(default_factory=list)
 
@@ -117,9 +126,20 @@ def _parse_batch(raw: Any, inputs: list[InputDef], problems: list[str]) -> Batch
     if kind not in BATCH_KINDS:
         problems.append(f'"batch.kind" must be one of {", ".join(BATCH_KINDS)} (got {kind!r})')
         return None
-    return BatchDef(input=target.key, kind=kind,
-                    default_excludes=tuple(normalize_jcr_path(str(p)) for p in raw.get("defaultExcludes") or []),
-                    label=str(raw.get("label") or ""))
+    return BatchDef(input=target.key, kind=kind, label=str(raw.get("label") or ""))
+
+
+def _parse_system_excludes(raw: Any, inputs: list[InputDef], problems: list[str]) -> SystemExcludes | None:
+    if not raw:
+        return None
+    if not isinstance(raw, dict):
+        problems.append('"systemExcludes" must be an object')
+        return None
+    target = next((i for i in inputs if i.key == raw.get("input")), None)
+    if target is None or target.type != "path_list":
+        problems.append(f'"systemExcludes.input" must name a path_list input (got {raw.get("input")!r})')
+        return None
+    return SystemExcludes(input=target.key, paths=tuple(normalize_jcr_path(str(p)) for p in raw.get("paths") or []))
 
 
 def _load_folder(folder: Path) -> ScriptDef:
@@ -138,10 +158,11 @@ def _load_folder(folder: Path) -> ScriptDef:
         problems.append("Duplicate input keys")
     manifest_formatters = [str(f) for f in manifest.get("formatters") or []]
     batch = _parse_batch(manifest.get("batch"), inputs, problems)
+    system_excludes = _parse_system_excludes(manifest.get("systemExcludes"), inputs, problems)
     script = ScriptDef(
         id=folder.name, name=str(manifest.get("name") or folder.name), description=str(manifest.get("description") or ""),
         script_path=folder / "script.groovy", inputs=inputs, problems=problems,
-        legacy_manifest_formatters=manifest_formatters, batch=batch,
+        legacy_manifest_formatters=manifest_formatters, batch=batch, system_excludes=system_excludes,
     )
     if not script.script_path.exists():
         problems.append("script.groovy is missing")
@@ -205,15 +226,23 @@ def validate(script: ScriptDef, values: dict[str, Any]) -> list[str]:
     return errors
 
 
-def validate_batch(script: ScriptDef, skips: list[str]) -> list[str]:
-    """Batch skip entries must sit under the same prefix as the script's main
+def validate_skips(script: ScriptDef, skips: list[str]) -> list[str]:
+    """System-area skips must sit under the same prefix as the script's main
     path input (e.g. /content/dam for the DAM reports)."""
-    if script.batch is None:
-        return []
-    target = next((i for i in script.inputs if i.key == script.batch.input), None)
-    prefix = target.must_start_with if target else ""
+    main = next((i for i in script.inputs if i.iterate), None)
+    prefix = main.must_start_with if main else ""
     bad = [p for p in skips if prefix and not under(normalize_jcr_path(p), prefix)]
-    return [f"Batch skips must start with {prefix}: " + ", ".join(bad)] if bad else []
+    return [f"Skipped system areas must start with {prefix}: " + ", ".join(bad)] if bad else []
+
+
+def with_skips(script: ScriptDef, values: dict[str, Any], skips: list[str]) -> dict[str, Any]:
+    """`values` with the system-area skips merged into the script's own
+    exclusion input, so they apply to every run, batch or not."""
+    if script.system_excludes is None or not skips:
+        return values
+    key = script.system_excludes.input
+    merged = list(dict.fromkeys([*(values.get(key) or []), *(normalize_jcr_path(p) for p in skips)]))
+    return {**values, key: merged}
 
 
 def expand_runs(script: ScriptDef, values: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:

@@ -34,7 +34,15 @@ def matches = { Resource r ->
 
 def found = []
 def skipped = []
-def looseItems = 0  // non-matching content directly under the root, not covered by any batch
+// Content no discovered root covers: assets sitting in the entered path or in
+// any folder above the root level, and (pages) the intermediate pages
+// themselves when levels > 1, e.g. each site's home page.
+def looseItems = 0
+def loosePaths = []
+def noteLoose = { String path ->
+    looseItems++
+    if (loosePaths.size() < 20) loosePaths << path
+}
 def walk
 walk = { Resource parent, int depth ->
     parent.listChildren().each { Resource child ->
@@ -45,10 +53,11 @@ walk = { Resource parent, int depth ->
             return
         }
         if (!matches(child)) {
-            if (depth == 1 && child.resourceType == "dam:Asset") looseItems++
+            if (child.resourceType == "dam:Asset") noteLoose(child.path)
             return
         }
         if (depth < levels) {
+            if (kind == "page") noteLoose(child.path)  // its own row isn't in any deeper root's report
             walk(child, depth + 1)
         } else {
             found << child.path
@@ -57,4 +66,5 @@ walk = { Resource parent, int depth ->
 }
 walk(start, 1)
 
-emit([root: root, kind: kind, levels: levels, children: found.sort(), skipped: skipped.sort(), looseItems: looseItems])
+emit([root: root, kind: kind, levels: levels, children: found.sort(), skipped: skipped.sort(), looseItems: looseItems,
+      loosePaths: loosePaths])

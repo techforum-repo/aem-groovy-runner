@@ -49,6 +49,7 @@ class Discovery:
     children: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     loose_items: int = 0
+    loose_paths: list[str] = field(default_factory=list)
     error: str = ""
 
 
@@ -68,7 +69,7 @@ def discover_roots(client: "ConsoleClient", root: str, kind: str, excludes: list
     if not isinstance(payload, dict) or payload.get("error"):
         return Discovery(root=root, error=str((payload or {}).get("error") or "unexpected discovery output"))
     return Discovery(root=root, children=list(payload.get("children") or []), skipped=list(payload.get("skipped") or []),
-                     loose_items=int(payload.get("looseItems") or 0))
+                     loose_items=int(payload.get("looseItems") or 0), loose_paths=list(payload.get("loosePaths") or []))
 
 
 class RunCancelled(Exception):
@@ -189,7 +190,7 @@ def run_script(
             "batch_id": batch_id, "kind": script.batch.kind, "excludes": batch.get("excludes"),
             "levels": batch.get("levels"),
             "roots": [{"root": d.root, "found": len(d.children), "skipped": d.skipped, "loose_items": d.loose_items,
-                       "error": d.error} for d in discoveries]})
+                       "loose_paths": d.loose_paths, "error": d.error} for d in discoveries]})
         for d in discoveries:
             if d.error:  # surfaces as a failed row the user can see and retry
                 results.append(GeneratedFile(run_id=0, session_id=session_id, script_id=script.id, script_name=script.name,
@@ -301,11 +302,12 @@ def format_file(file: GeneratedFile, formatter_id: str) -> str:
     return str(out)
 
 
-def format_combined(files: list[GeneratedFile], formatter_id: str, session_id: str) -> str:
+def format_combined(files: list[GeneratedFile], formatter_id: str, session_id: str, *, name: str | None = None,
+                    min_files: int = 2) -> str:
     """Formats several session results as ONE file (rows concatenated, in the
     order given), e.g. every site of a batched page report. Returns its path."""
     formatter = formatters.get(formatter_id)
-    if len(files) < 2:
+    if len(files) < min_files:
         raise ValueError("select at least two results to combine")
     combined: list[Any] = []
     for file in files:
@@ -323,7 +325,12 @@ def format_combined(files: list[GeneratedFile], formatter_id: str, session_id: s
     out_dir = session_dir(session_id) / "combined"
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    out = out_dir / f"combined_{files[0].script_id}_{len(files)}-results_{stamp}.{formatter_id}{formatter.extension}"
+    stem = name or f"combined_{files[0].script_id}_{len(files)}-results"
+    out = out_dir / f"{stem}_{stamp}.{formatter_id}{formatter.extension}"
+    n = 2
+    while out.exists():  # two entered paths with the same short name, combined in the same second
+        out = out_dir / f"{stem}_{stamp}-{n}.{formatter_id}{formatter.extension}"
+        n += 1
     formatter.write(combined, out)
     digest = audit.sha256_file(out)
     audit.log("format.combined", session_id=session_id, aem_user=files[0].aem_user, target=out.name, details={

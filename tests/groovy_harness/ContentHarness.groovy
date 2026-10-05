@@ -34,7 +34,7 @@ def other = page("/content/other", ["jcr:title": "Other", "cq:template": "/conf/
 def pages = [root, en, prod, arch, deep, other].collectEntries { [(it.path): it] }
 // /content is a plain folder holding two sites and the DAM (not a page)
 def contentFolder = new Res(path: "/content", children: [
-        site : new Res(path: "/content/site", page: root),
+        site : new Res(path: "/content/site", page: root, children: [en: new Res(path: "/content/site/en", page: en)]),
         other: new Res(path: "/content/other", page: other),
         dam  : new Res(path: "/content/dam")])
 
@@ -54,7 +54,10 @@ def assets = [
 ]
 assets.each { it.type = "dam:Asset" }
 def damB = new Res(path: "/content/dam/b", children: [
-        a  : new Res(path: "/content/dam/b/a"), img: new Res(path: "/content/dam/b/img"),
+        a  : new Res(path: "/content/dam/b/a", children: [
+                sub: new Res(path: "/content/dam/b/a/sub"),
+                "one.pdf": assets.find { it.path == "/content/dam/b/a/one.pdf" }]),
+        img: new Res(path: "/content/dam/b/img"),
         old: new Res(path: "/content/dam/b/old"), "loose.pdf": assets.find { it.path.endsWith("loose.pdf") },
         "jcr:content": new Res(path: "/content/dam/b/jcr:content", type: "nt:unstructured")])
 def resources = ["/content": contentFolder, "/content/dam/b": damB, "/content/dam/it's": new Res(path: "/content/dam/it's")]

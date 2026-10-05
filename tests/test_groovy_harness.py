@@ -208,3 +208,14 @@ def test_discovery_finds_site_pages_and_dam_folders(classes, tmp_path):
 
     assert "Path not found" in _discover(classes, tmp_path, {"root": "/content/nope", "kind": "folder",
                                                              "excludes": [], "levels": 1})["error"]
+
+
+def test_discovery_levels_two_reports_what_no_root_covers(classes, tmp_path):
+    # Pages: /content -> sites (level 1) -> their child pages (level 2). The site home pages are left uncovered.
+    pages = _discover(classes, tmp_path, {"root": "/content", "kind": "page", "excludes": [], "levels": 2})
+    assert pages["children"] == ["/content/site/en"]
+    assert pages["looseItems"] == 2 and set(pages["loosePaths"]) == {"/content/site", "/content/other"}
+    # DAM: assets inside level-1 folders (a/one.pdf) and in the entered path (loose.pdf) aren't in any level-2 folder.
+    dam = _discover(classes, tmp_path, {"root": "/content/dam/b", "kind": "folder", "excludes": [], "levels": 2})
+    assert dam["children"] == ["/content/dam/b/a/sub"]
+    assert set(dam["loosePaths"]) == {"/content/dam/b/a/one.pdf", "/content/dam/b/loose.pdf"}
