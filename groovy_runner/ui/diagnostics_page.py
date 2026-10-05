@@ -3,6 +3,7 @@ from __future__ import annotations
 import streamlit as st
 
 from ..logging_setup import LOG_PATH
+from ..utils import display_path
 from .shared import audit_event, download_button, get_client, is_mock, render_friendly_error
 
 
@@ -30,7 +31,7 @@ def render() -> None:
 
     st.divider()
     st.markdown("#### Logs")
-    st.caption(f"Rotating file log at `{LOG_PATH}` (max 1MB × 3 backups).")
+    st.caption(f"Rotating file log at `{display_path(LOG_PATH)}` (max 1MB × 3 backups).")
     if LOG_PATH.exists():
         download_button("Download log file", lambda: LOG_PATH.read_bytes(), LOG_PATH.name, "text/plain")
     else:

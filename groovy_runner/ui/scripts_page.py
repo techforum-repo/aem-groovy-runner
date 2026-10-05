@@ -5,58 +5,75 @@ import streamlit as st
 
 from .. import readonly
 from ..groovy_script import JSON_END, JSON_START
+from ..config import PROJECT_ROOT
 from ..scripts_registry import SCRIPTS_DIR, discover
+from ..utils import display_path
 
-_HOW_TO = f'''
-Create a folder under `{SCRIPTS_DIR}` with two files. It shows up here on the next page refresh.
+SAMPLES_DIR = PROJECT_ROOT / "examples"
+# Tab label -> sample folder, shown under "Adding a script"
+SAMPLES = {"Asset script": SAMPLES_DIR / "asset-sample", "Page script": SAMPLES_DIR / "page-sample"}
 
-**`script.groovy`**: read inputs from `CONFIG` and print one JSON result between the markers:
+_HOW_TO_INTRO = f"""
+Create a folder under `{display_path(SCRIPTS_DIR)}/` with two files, `script.groovy` and `manifest.json`. It shows up here
+on the next page refresh. The quickest start is to copy one of the samples below (in `{display_path(SAMPLES_DIR)}/`)
+and change its report logic: one for DAM assets, one for pages. Both already work with Batch.
+"""
 
-```groovy
-import groovy.json.JsonOutput
-import groovy.json.JsonSlurper
+_HOW_TO_DETAILS = f"""
+**Inputs** come from `manifest.json` and drive the form. Types: `text`, `path`, `path_list`, `string_list`, `bool`,
+`number`, `select` (with `options`). `iterate: true` on a list input means one run (and one output file) per line.
+Other keys: `required`, `default`, `advanced`, `help`, `placeholder`, `must_start_with`.
 
-def CONFIG = new JsonSlurper().parseText(new String("__CONFIG_B64__".decodeBase64(), "UTF-8"))
-def rows = []
-// ... use CONFIG.rootPath etc., add maps to rows ...
-println "{JSON_START}"
-println JsonOutput.toJson([rows: rows])   // extra keys become run details; {{error: "..."}} fails the run
-println "{JSON_END}"
-```
+**Output**: one JSON document between `{JSON_START}` and `{JSON_END}`. `rows` become the result file (the keys of
+each row are the Excel columns); other keys show as run details; `{{"error": "..."}}` fails the run.
 
-**`manifest.json`**: name, description and the inputs that drive the form. Formatting isn't part of a script:
-link formatters to it on the **Formatters** page (it shows as "not linked" until you do):
+**Formatting** isn't part of a script: link formatters to it on the **Formatters** page (it shows as
+"not linked" until you do).
 
-```json
-{{
-  "name": "My Script",
-  "description": "What it does",
-  "inputs": [
-    {{"key": "rootPath", "label": "Root paths", "type": "path_list", "iterate": true, "required": true}},
-    {{"key": "excludedPaths", "label": "Excluded paths", "type": "path_list"}},
-    {{"key": "includeDrafts", "label": "Include drafts", "type": "bool", "default": false, "advanced": true}}
-  ]
-}}
-```
+**Batch** (for large paths) is done by the app, so the script has no batching code. Batch is offered when:
 
-Input types: `text`, `path`, `path_list`, `string_list`, `bool`, `number`, `select` (with `options`).
-`iterate: true` on a list input means one run (and one output file) per line.
+1. a `path_list` input has `"iterate": true`: one path per run (`rootPath` in the sample);
+2. there's an excluded-paths input: a `path_list` whose key or label contains "exclude", or the one named in
+   `systemExcludes` (`excludedPaths` in the sample);
+3. the script skips the **whole subtree** under each excluded path (`isExcluded` in the sample).
 
-**Batch** (for large paths) is done by the app, not the script: no batching code is needed. It's offered
-automatically when the script has an `iterate` path list **and** an excluded-paths input (a path list whose key
-or label contains "exclude", or the one named in `systemExcludes`), and the script **skips the whole subtree**
-under each excluded path. The app may add paths there itself (to cover only the content directly in a folder).
-Options counted from the entered path go in `"batch": {{"notWith": [...]}}`; rows that are totals in
-`"batch": {{"mergeRows": {{"groupBy": [...], "sum": [...]}}}}`. `"batch": false` turns Batch off.
-A plain `.groovy` file without a manifest also works: it has no inputs, and its JSON output is found
-even without markers (the first line starting with `[` or `{{`).
-'''
+The app may add excluded paths itself, to cover only the content sitting directly in a folder. That's why
+rule 3 matters: if the script skipped only the folder itself and not what's under it, rows would be duplicated.
+
+Optional, under `"batch"` in the manifest, only when they apply:
+
+| Setting | When | Example |
+|---|---|---|
+| `false` (instead of an object) | never offer Batch for this script | |
+| `"notWith": [...]` | options counted from the entered path, which mean something else per part: Batch is refused while set | `maxDepth` |
+| `"mergeRows": {{"groupBy": [...], "sum": [...]}}` | rows are totals, so parts are added up | counts per type |
+| `"includeRootInput": "..."` | a bool input for "include the root itself" | `includeRoot` |
+| `"kind": "page"` or `"folder"` | override the guess (`/content/dam` = folders, else pages) | |
+
+A plain `.groovy` file without a manifest also works: it has no inputs, and its JSON output is found even
+without markers (the first line starting with `[` or `{{`).
+"""
+
+
+def _render_how_to() -> None:
+    st.markdown(_HOW_TO_INTRO)
+    for tab, folder in zip(st.tabs(list(SAMPLES)), SAMPLES.values()):
+        with tab:
+            st.caption(f"`{display_path(folder)}/`")
+            for name, language in (("script.groovy", "groovy"), ("manifest.json", "json")):
+                path = folder / name
+                st.markdown(f"**`{name}`**")
+                if path.exists():
+                    st.code(path.read_text(encoding="utf-8"), language=language)
+                else:
+                    st.caption(f"Sample not found at `{display_path(path)}`.")
+    st.markdown(_HOW_TO_DETAILS)
 
 
 def render() -> None:
     st.markdown("### Scripts")
     scripts = discover()
-    st.caption(f"{len(scripts)} script(s) in `{SCRIPTS_DIR}`. Re-scanned on every refresh.")
+    st.caption(f"{len(scripts)} script(s) in `{display_path(SCRIPTS_DIR)}/`. Re-scanned on every refresh.")
     st.info(
         "🔒 **Read-only enforcement** applies to every script, with no setting to turn it off. "
         "(1) A static check blocks write APIs and escape hatches (reflection, dynamic calls, evaluate, "
@@ -103,4 +120,4 @@ def render() -> None:
     st.caption("Which formatters apply to which script is managed separately, on the **Formatters** page.")
 
     st.markdown("#### Adding a script")
-    st.markdown(_HOW_TO)
+    _render_how_to()

@@ -112,3 +112,29 @@ def test_explicit_batch_section_is_validated(tmp_path):
     script = _write_script(tmp_path, {"inputs": [{"key": "p", "type": "path_list", "iterate": True}],
                                       "batch": {"kind": "page"}})
     assert script.batch is None and any("excludeInput" in p for p in script.problems)
+
+
+def test_sample_skeleton_qualifies_for_batch_and_is_read_only():
+    from pathlib import Path
+    samples = {s.id: s for s in discover(Path(__file__).resolve().parent.parent / "examples")}
+    assert set(samples) == {"asset-sample", "page-sample"}
+    for sample in samples.values():
+        assert sample.problems == []  # includes the read-only check
+        assert (sample.batch.input, sample.batch.exclude_input) == ("rootPath", "excludedPaths")
+    assert samples["asset-sample"].batch.kind == "folder" and samples["page-sample"].batch.kind == "page"
+
+
+def test_scripts_page_shows_the_sample_skeleton():
+    from pathlib import Path
+    from streamlit.testing.v1 import AppTest
+    root = Path(__file__).resolve().parent.parent
+    at = AppTest.from_file(str(root / "app.py"), default_timeout=60).run()
+    at.sidebar.radio[0].set_value("Scripts").run()
+    assert not at.exception, at.exception
+    shown = [c.value.strip() for c in at.code]
+    assert [t.label for t in at.tabs] == ["Asset script", "Page script"]
+    for sample in ("asset-sample", "page-sample"):
+        for name in ("script.groovy", "manifest.json"):
+            assert (root / "examples" / sample / name).read_text().strip() in shown
+    text = " ".join([m.value for m in at.markdown] + [c.value for c in at.caption])
+    assert str(root) not in text and "`scripts/`" in text  # no machine paths on screen

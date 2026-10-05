@@ -1,0 +1,21 @@
+{
+  "name": "Sample: assets under a folder",
+  "description": "Skeleton for new scripts: lists every asset under a DAM folder. Batch-ready without any batching code.",
+  "inputs": [
+    {
+      "key": "rootPath",
+      "label": "DAM folder paths — one per line (each produces its own file)",
+      "type": "path_list",
+      "iterate": true,
+      "required": true,
+      "must_start_with": "/content/dam",
+      "placeholder": "/content/dam/acme"
+    },
+    {
+      "key": "excludedPaths",
+      "label": "Excluded folders — one per line",
+      "type": "path_list",
+      "must_start_with": "/content/dam"
+    }
+  ]
+}

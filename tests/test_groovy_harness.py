@@ -22,6 +22,8 @@ pytestmark = pytest.mark.skipif(not JARS or not shutil.which("java"), reason="GR
 
 ROOT = "/content/dam/acme/Inter Cardio"
 SCRIPTS = {s.id: s for s in discover()}
+SAMPLE_DIR = Path(__file__).resolve().parent.parent / "examples"
+SCRIPTS.update({s.id: s for s in discover(SAMPLE_DIR)})  # the skeleton shown on the Scripts page
 
 
 @pytest.fixture(scope="module")
@@ -275,3 +277,23 @@ def test_batch_parts_together_cover_exactly_the_unbatched_run_pages(classes, tmp
     batched = _batched_rows(classes, tmp_path, "page-report", values, root, "page", levels, "Path")
     whole, _, _ = _run_content(classes, tmp_path, "page-report", values)
     assert sorted(batched) == sorted(r["Path"] for r in whole) and len(set(batched)) == len(batched)
+
+
+@pytest.mark.parametrize("levels", [1, 2, 3])
+def test_sample_skeleton_is_batch_ready_and_batching_changes_nothing(classes, tmp_path, levels):
+    """The skeleton on the Scripts page: no batching code, yet batched == unbatched."""
+    values = {"rootPath": ["/content/dam/b"]}
+    batched = _batched_rows(classes, tmp_path, "asset-sample", values, "/content/dam/b", "folder", levels,
+                            "Asset Path")
+    whole, _, _ = _run_content(classes, tmp_path, "asset-sample", values)
+    assert len(whole) == 6  # every asset under /content/dam/b (z.pdf is under /content/dam/other)
+    assert sorted(batched) == sorted(r["Asset Path"] for r in whole) and len(set(batched)) == len(batched)
+
+
+@pytest.mark.parametrize("levels", [1, 2, 3])
+@pytest.mark.parametrize("root", ["/content", "/content/site"])
+def test_page_sample_skeleton_is_batch_ready_and_batching_changes_nothing(classes, tmp_path, levels, root):
+    values = {"rootPath": [root]}
+    batched = _batched_rows(classes, tmp_path, "page-sample", values, root, "page", levels, "Path")
+    whole, _, _ = _run_content(classes, tmp_path, "page-sample", values)
+    assert whole and sorted(batched) == sorted(r["Path"] for r in whole) and len(set(batched)) == len(batched)

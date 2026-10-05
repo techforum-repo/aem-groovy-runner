@@ -61,3 +61,13 @@ def slug_for_path(dam_path: str) -> str:
             break
     segments = [re.sub(r"[^A-Za-z0-9._-]+", "-", seg).strip("-") for seg in path.strip("/").split("/")]
     return "_".join(s for s in segments if s) or "dam"
+
+
+def display_path(path: Path) -> str:
+    """A path as shown on screen: relative to the app folder, so no user or
+    machine paths appear in the UI (or in screenshots of it)."""
+    from .config import PROJECT_ROOT
+    try:
+        return Path(path).resolve().relative_to(PROJECT_ROOT.resolve()).as_posix()
+    except ValueError:
+        return Path(path).name
