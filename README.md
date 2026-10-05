@@ -59,8 +59,8 @@ technical account, service credentials, or basic auth.
 
 | Page | What it does |
 |---|---|
-| Run | Choose a script, fill its form (with per-script presets), run it, then format/preview/download **this session's** results: all Excel files individually in one click, a zip, or a single file |
-| Scripts | Every script found under `scripts/`, with its read-only check result, inputs, source, and any manifest problems; also how to add one |
+| Run | Choose a script, fill its form (with per-script presets), optionally tick **Batch** for large paths, run it, then format/preview/download **this session's** results (one entry, and one file, per entered path): all Excel files individually in one click, a zip, or a single file |
+| Scripts | Every script found under `scripts/`, with its read-only check result, inputs, whether Batch is available for it, source, and any manifest problems; also how to add one |
 | Formatters | The formatter catalogue and the script ↔ formatter **links** grid |
 | History | All runs from every session; re-download earlier files, including combined files (one per entered path for batches) |
 | Audit | Append-only audit trail (filter + CSV export) and per-run traceability with a file-integrity check |
@@ -108,6 +108,21 @@ rows are saved as the result file and the other keys show as run details;
 `{"error": "..."}` fails the run. Scripts without markers still work: the
 first output line starting with `[` or `{` is parsed, so an unmodified
 console script that prints `Total rows generated: N` and then JSON is fine.
+
+**Writing a script that supports Batch.** Batching is done by the app, so a
+script needs no batching code. It's offered automatically when the script:
+
+1. has a `path_list` input with `"iterate": true` (one run per entered path),
+2. has an excluded-paths input: a `path_list` named in `systemExcludes`, or
+   whose key or label contains "exclude" (e.g. `excludedPaths`), and
+3. **skips the whole subtree** under each excluded path (`path == ex ||
+   path.startsWith(ex + "/")`), as the bundled scripts do.
+
+The app may call it with excluded paths you didn't type: for a part that
+covers only the content sitting directly in a folder, it excludes that
+folder's children. If an option is counted from the entered path (a max depth,
+a row cap), list it in `batch.notWith`; if rows are totals (counts per type),
+declare `batch.mergeRows`. See [Whole-repository runs](#whole-repository-runs-batching).
 
 ## Formatters
 
@@ -189,42 +204,81 @@ in the manifest:
 
 Running a report on all of `/content` or `/content/dam` in one request is
 risky: a long open request, large memory use in AEM, huge output, and AEM's
-per-query read limit (commonly 100,000 nodes). The same three scripts offer
-**Batch** (a checkbox under their inputs):
+per-query read limit (commonly 100,000 nodes). Scripts that take a list of
+paths offer **Batch** (a checkbox under their inputs; all three bundled
+scripts do):
 
-1. **Discover:** one small read-only request lists the roots under each entered
-   path: child **pages** for Page Report (each site under `/content`), child
+Batching never changes **what** is reported: every page or asset under the
+path you enter is included, whatever the settings. It only splits the work
+into smaller requests, and you still get **one file per entered path**.
+
+1. **Discover:** one small read-only request splits each entered path into
+   parts: child **pages** for Page Report (each site under `/content`), child
    **folders** for the DAM reports (each top-level folder under `/content/dam`).
-   Your excluded paths and the skipped system areas are skipped here too, so
-   they never become a run.
-2. **Run:** the script runs **once per discovered root**: small requests, live
-   progress, Cancel and Retry per root.
-3. **One file per entered path:** batching only changes how the work is split,
-   not what you get. The roots' results are **combined automatically** into one
-   file per path you entered. After a **Retry** of failed or cancelled roots,
-   that file is rebuilt to include them, using only that batch's own earlier
-   results; a new run never borrows results from a different run. Combined files
-   are also listed on **History**, so they survive a page refresh. If the combined rows would exceed
-   Excel's 1,048,575-row limit, each root is formatted separately instead,
-   with a message saying so.
+   Content sitting *above* the split (assets directly in the entered folder or
+   in an intermediate folder, or an entered/intermediate page's own row) gets a
+   small **direct items** part of its own, so nothing is left out. Your excluded
+   paths and the skipped system areas are skipped here too.
+2. **Run:** the script runs **once per part**: small requests, live progress,
+   Cancel and Retry per part.
+3. **One file per entered path:** the parts' results are **combined
+   automatically** into one file per path you entered. The results table shows
+   one entry per entered path; the parts are listed under **Batch parts** for
+   traceability only. After a **Retry** of failed or cancelled parts, that file
+   is rebuilt to include them, using only that batch's own earlier results; a
+   new run never borrows results from a different run. Combined files are also
+   listed on **History**, so they survive a page refresh. If the combined rows
+   would exceed Excel's 1,048,575-row limit, each part is formatted separately
+   instead, with a message saying so.
 
-**Levels below the entered path** sets where the work is split: 1 = each
+**Levels below the entered path** sets only where the work is split: 1 = each
 direct child (each site under `/content`, each top-level DAM folder); 2 = each
-child of those, for when one top-level folder is too big. At 2+, whatever
-sits *in* the level-1 folders is in no run: assets next to the subfolders, or
-each site's own home page.
+child of those, for when one top-level folder is itself too big. A folder or
+page above that level with nothing further to split is run whole.
 
-After a batch, a note lists what was discovered and skipped, and any items
-outside every discovered root, since the batch doesn't cover those. Lower
-Levels, or run those paths without batching, to include them. Discovery is
-audited (`run.batch_discovered`), as is combining (`format.combined`, with the
-source runs' hashes).
+Discovery is audited (`run.batch_discovered`), as is combining
+(`format.combined`, with the source runs' hashes).
 
-Batch is enabled per script in the manifest (`kind` is `page` or `folder`;
-`input` must be the script's one-run-per-line input):
+Batching lives entirely in the app: **scripts contain no batching code**.
+With Batch on, the app discovers the parts, then calls the unchanged script
+once per part with ordinary inputs: the path input set to the part, and for a
+"direct items" part, that path's children added to the script's own
+excluded-paths input. With Batch off, the script simply runs on what you
+entered.
+
+Any script gets Batch automatically when its one-run-per-line input is a
+`path_list` and it has an excluded-paths input (a `path_list`: the one named in
+`systemExcludes`, or its only other `path_list` input), provided the script
+skips whole subtrees under the excluded paths. The kind is inferred from the
+path prefix (`/content/dam` = folders, otherwise pages). A `batch` section in
+the manifest is only needed to override that, or `"batch": false` to switch it off:
 
 ```json
-"batch": {"input": "rootPath", "kind": "page", "label": "..."}
+"batch": {
+  "input": "rootPath",
+  "kind": "page",
+  "excludeInput": "excludedPaths",
+  "includeRootInput": "includeRoot",
+  "label": "..."
+}
+```
+
+`includeRootInput` (optional) names a bool input that says whether the
+entered root's own content is wanted: the app keeps it on for the parts,
+whose roots are internal.
+
+Two more optional settings keep a batched file identical to an unbatched run:
+
+- `notWith`: inputs measured from the entered path (a max depth, a row cap,
+  folder-grouping levels). Each part has its own root, so they can't mean the
+  same thing; while any of them is set, Batch is refused with a message.
+- `mergeRows`: for scripts whose rows are already totals (Assets by Type's
+  summary), rows with the same `groupBy` values have their `sum` columns added
+  up, so the file has one total per type instead of one per part.
+
+```json
+"notWith": ["maxAssets", "groupByFolderLevels"],
+"mergeRows": {"groupBy": ["Folder", "Format"], "sum": ["Assets", "Total Size (MB)"]}
 ```
 
 Without batching, Page Report also accepts a folder root (`/content` walks
@@ -341,8 +395,14 @@ as shared.
     audit trail (`run.batch_cancel_requested`, `run.cancelled`).
   - **Retry** re-runs both the failed and the cancelled runs.
 - Runs execute one at a time to keep load on the author low. A very large
-  folder can exceed the request timeout; split it into subfolders, or raise
-  the per-run timeout on the Settings page.
+  folder can exceed the request timeout: tick **Batch**, split it into
+  subfolders yourself, or raise the per-run timeout on the Settings page.
+- **Batch on a whole DAM.** A "direct items" part (assets sitting directly in
+  a folder above the split) runs the script on that folder with its
+  subfolders excluded. The bundled DAM scripts still query the whole folder
+  before dropping the excluded assets, so on `/content/dam` itself that one
+  part can be slow or hit AEM's query limit. It then shows as failed (nothing
+  is silently missed). Entering the top-level folders instead avoids it.
 - The Groovy Console is often disabled on production. Run against an
   environment where it's enabled.
 

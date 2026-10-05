@@ -63,7 +63,21 @@
   "batch": {
     "input": "rootPath",
     "kind": "folder",
-    "label": "Batch: run each top-level folder under the entered path as its own run (e.g. /content/dam)"
+    "label": "Batch: process large paths (e.g. /content/dam) in smaller requests, still one file per entered path",
+    "notWith": [
+      "maxAssets",
+      "groupByFolderLevels"
+    ],
+    "mergeRows": {
+      "groupBy": [
+        "Folder",
+        "Format"
+      ],
+      "sum": [
+        "Assets",
+        "Total Size (MB)"
+      ]
+    }
   },
   "systemExcludes": {
     "input": "excludedFolders",

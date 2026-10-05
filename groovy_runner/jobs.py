@@ -61,7 +61,7 @@ def _progress_line(result: runner.GeneratedFile) -> str:
     return f"- `{result.label}`: {mark} ({result.elapsed_seconds:.0f}s)"
 
 
-def _combine_per_entered_path(job: RunJob, results: list[runner.GeneratedFile],
+def _combine_per_entered_path(job: RunJob, script: ScriptDef, results: list[runner.GeneratedFile],
                               prior: list[runner.GeneratedFile]) -> None:
     """Batch mode: one file per entered path, built from all its discovered
     roots. `prior` are earlier successful results in this session (a Retry
@@ -71,19 +71,20 @@ def _combine_per_entered_path(job: RunJob, results: list[runner.GeneratedFile],
         if result.ok and result.script_id == job.script_id:
             latest[result.label] = result
     for d in job.discoveries:
-        if d.error or not d.children:
+        labels = d.labels
+        if d.error or not labels:
             continue
-        group = [latest[c] for c in d.children if c in latest]
-        missing = [c for c in d.children if c not in latest]
+        group = [latest[c] for c in labels if c in latest]
+        missing = [c for c in labels if c not in latest]
         if not group:
-            job.messages.append(("warning", f"No combined file for `{d.root}`: none of its {len(d.children)} "
-                                            "root(s) succeeded. See the errors below, then Retry."))
+            job.messages.append(("warning", f"No combined file for `{d.root}`: none of its {len(labels)} "
+                                            "batch part(s) succeeded. See the errors below, then Retry."))
             continue
         job.current = f"combining results for {d.root}"
         slug = slug_for_path(d.root)
         try:
             path = runner.format_combined(group, job.formatter_id, job.session_id, min_files=1,
-                                          name=f"{slug}_all-{len(group)}-roots")
+                                          name=slug, merge=script.batch.merge_rows)
         except ValueError as exc:  # e.g. more rows than one Excel sheet holds: fall back to one file per root
             for result in group:
                 try:
@@ -94,9 +95,9 @@ def _combine_per_entered_path(job: RunJob, results: list[runner.GeneratedFile],
                                             "was formatted separately instead."))
             continue
         job.combined.append((d.root, path))
-        text = f"One file for `{d.root}`: combined {len(group)} root(s) into **{Path(path).name}**."
+        text = f"One file for `{d.root}`: **{Path(path).name}** (combined from {len(group)} batch part(s))."
         if missing:
-            text += (f" ⚠️ {len(missing)} root(s) not included (failed or cancelled): use Retry, and this file is "
+            text += (f" ⚠️ {len(missing)} part(s) not included (failed or cancelled): use Retry, and this file is "
                      "rebuilt with them.")
         job.messages.append(("success" if not missing else "warning", text))
 
@@ -123,9 +124,10 @@ def start(client: runner.ConsoleClient, script: ScriptDef, values: dict[str, Any
         try:
             job.results = runner.run_script(client, script, values, session_id=session_id, on_progress=on_progress,
                                             only_labels=only_labels, cancel=job.cancel, batch=batch,
-                                            on_discovered=lambda found: job.discoveries.extend(found))
+                                            on_discovered=lambda found: job.discoveries.extend(found),
+                                            origin=(lineage or [None])[0])
             if formatter_id and batch is not None and script.batch is not None:
-                _combine_per_entered_path(job, job.results, prior_results or [])
+                _combine_per_entered_path(job, script, job.results, prior_results or [])
             elif formatter_id:
                 job.current = "formatting"
                 for result in job.results:

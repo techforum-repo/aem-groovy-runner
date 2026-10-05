@@ -51,9 +51,10 @@ class MockGroovyConsoleClient:
         skipped = [c for c in candidates if any(c == ex or c.startswith(ex + "/") for ex in excludes)]
         system = {"experience-fragments", "launches", "dam"} if config["kind"] == "page" else set()
         children = [c for c in candidates if c not in skipped and c.rsplit("/", 1)[-1] not in system]
-        loose = [f"{root}/readme.pdf", f"{root}/logo.png"] if config["kind"] == "folder" else []
+        # Folder: the entered folder holds assets of its own; page: an entered page has its own row.
+        direct = ([{"path": root, "exclude": children}] if config["kind"] == "folder" or root.count("/") > 1 else [])
         return {"root": root, "kind": config["kind"], "levels": config.get("levels", 1), "children": children,
-                "skipped": skipped, "looseItems": len(loose), "loosePaths": loose}
+                "direct": direct, "skipped": skipped}
 
     def _pages(self, config: dict) -> dict:
         """Shaped like scripts/page-report output (same column names)."""
