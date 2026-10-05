@@ -1,0 +1,13 @@
+# Streamlit reads this from the folder the app is started in (the start
+# scripts cd here first).
+
+[server]
+# Only this machine can open the app. Streamlit's default is every network
+# interface, which on a shared server would let anyone who can reach the
+# port use the app as the signed-in user (a remembered sign-in is restored for
+# any new browser session). Change only if you understand that, and untick
+# "Remember" if you do.
+address = "localhost"
+
+[browser]
+gatherUsageStats = false

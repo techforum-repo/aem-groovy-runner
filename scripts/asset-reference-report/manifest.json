@@ -1,0 +1,70 @@
+{
+  "name": "Asset Reference Report",
+  "description": "Every dam:Asset under a DAM folder with its title/format/replication status, plus each page that references it (via AEM ReferenceSearch) and that page's status. One run per DAM folder.",
+  "inputs": [
+    {
+      "key": "parentDamPath",
+      "label": "DAM folder paths \u2014 one per line (each produces its own file)",
+      "type": "path_list",
+      "iterate": true,
+      "required": true,
+      "must_start_with": "/content/dam",
+      "placeholder": "/content/dam/acme/Product Library/brochures\n/content/dam/acme/Product Library/datasheets"
+    },
+    {
+      "key": "excludedAssetFolders",
+      "label": "Excluded asset folders \u2014 one per line (skipped entirely)",
+      "type": "path_list",
+      "placeholder": "/content/dam/acme/Product Library/brochures/archive",
+      "must_start_with": "/content/dam"
+    },
+    {
+      "key": "excludedReferenceRoots",
+      "label": "Excluded reference roots",
+      "type": "path_list",
+      "default": [
+        "/content/dam"
+      ],
+      "advanced": true,
+      "help": "Reference hits under these paths are ignored. /content/dam drops asset-to-asset references."
+    },
+    {
+      "key": "assetFormats",
+      "label": "Asset formats (empty = all types)",
+      "type": "string_list",
+      "advanced": true,
+      "placeholder": "application/pdf",
+      "help": "Matches the resolved format (dc:format, then dam:MIMEtype), case-insensitive."
+    },
+    {
+      "key": "includeUnreferenced",
+      "label": "Include assets with no references (status 'No Reference')",
+      "type": "bool",
+      "default": true,
+      "advanced": true
+    },
+    {
+      "key": "checkEncodedSpaces",
+      "label": "Also search the %20-encoded path variant",
+      "type": "bool",
+      "default": true,
+      "advanced": true
+    }
+  ],
+  "batch": {
+    "input": "parentDamPath",
+    "kind": "folder",
+    "defaultExcludes": [
+      "/content/dam/projects",
+      "/content/dam/collections",
+      "/content/dam/formsanddocuments",
+      "/content/dam/formsanddocuments-fdmodels",
+      "/content/dam/screens",
+      "/content/dam/workflow",
+      "/content/dam/catalogs",
+      "/content/dam/core-components-examples",
+      "/content/dam/we-retail"
+    ],
+    "label": "Batch: run each top-level folder under the entered path as its own run (e.g. /content/dam)"
+  }
+}

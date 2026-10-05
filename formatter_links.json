@@ -1,0 +1,21 @@
+{
+  "asset-reference-report": {
+    "formatters": [
+      "asset-reference-excel",
+      "generic-excel"
+    ],
+    "default": "asset-reference-excel"
+  },
+  "assets-by-type": {
+    "formatters": [
+      "generic-excel"
+    ],
+    "default": "generic-excel"
+  },
+  "page-report": {
+    "formatters": [
+      "generic-excel"
+    ],
+    "default": "generic-excel"
+  }
+}
