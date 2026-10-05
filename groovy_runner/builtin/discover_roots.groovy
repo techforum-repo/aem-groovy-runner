@@ -64,6 +64,9 @@ walk = { Resource parent, int depth ->
         }
     }
 }
+// A page entered as the root (e.g. /content/acme) is itself content that no
+// child run includes: report it, like the intermediate pages above.
+if (kind == "page" && start.adaptTo(Page) != null) noteLoose(root)
 walk(start, 1)
 
 emit([root: root, kind: kind, levels: levels, children: found.sort(), skipped: skipped.sort(), looseItems: looseItems,

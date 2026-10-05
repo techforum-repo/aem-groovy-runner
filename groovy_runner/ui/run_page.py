@@ -270,6 +270,14 @@ def _finalize(job: jobs.RunJob) -> None:
         messages.append(("info", note))
     st.session_state["session_files"].extend(job.results)
     outputs = st.session_state.setdefault("combined_outputs", {})
+    if job.batch is not None:
+        # This batch is now the current result for each entered path it discovered: drop any earlier combined
+        # file for those paths first, so a run that produced none can't leave a stale file looking current.
+        for d in job.discoveries:
+            outputs.pop((job.script_id, d.root), None)
+        if job.formatter_id is None and any(not d.error for d in job.discoveries):
+            messages.append(("info", "Formatter “None (JSON only)” was chosen, so no combined Excel file was made; "
+                                     "the per-root JSON results are below."))
     for root, path in job.combined:  # keyed by entered path: a rebuilt file (after Retry) replaces the earlier one
         outputs[(job.script_id, root)] = path
     batch_id = job.results[0].batch_id if job.results else ""

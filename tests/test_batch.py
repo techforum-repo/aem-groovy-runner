@@ -268,3 +268,35 @@ def test_history_lists_combined_files_and_each_button_downloads_its_own_file(iso
     assert len(captured) >= 2
     for file_name, data in captured:
         assert data() == Path(by_name[file_name]).read_bytes(), file_name
+
+
+def test_new_batch_with_no_successes_removes_the_old_combined_file(isolated, monkeypatch):
+    """Review fix: a later batch for the same path that produces no combined file must not leave the previous
+    batch's file listed as if it were current."""
+    at = AppTest.from_file(APP, default_timeout=60).run()
+    at.selectbox(key="script_id").set_value("assets-by-type").run()
+    at.text_area(key="in:assets-by-type:rootPath").set_value("/content/dam").run()
+    at.checkbox(key="batch_on:assets-by-type").check().run()
+    [b for b in at.button if b.label.startswith("▶️")][0].click().run()
+    _wait(at)
+    combined = lambda: [b.label for b in at.get("download_button") if b.label.startswith("⬇️ dam_all-")]  # noqa: E731
+    assert len(combined()) == 1
+
+    original = MockGroovyConsoleClient.run_script
+
+    def fail_all_roots(self, script_text):
+        from groovy_runner.groovy_script import extract_config
+        if "kind" not in extract_config(script_text):  # discovery still works; every root run fails
+            raise RuntimeError("AEM returned HTTP 503: busy")
+        return original(self, script_text)
+    monkeypatch.setattr(MockGroovyConsoleClient, "run_script", fail_all_roots)
+    [b for b in at.button if b.label.startswith("▶️")][0].click().run()
+    _wait(at)
+    assert combined() == []  # the old file is no longer offered as the result for /content/dam
+    assert any("No combined file for `/content/dam`: none of its 3 root(s) succeeded" in w.value for w in at.warning)
+
+    monkeypatch.setattr(MockGroovyConsoleClient, "run_script", original)
+    at.selectbox(key="run_formatter:assets-by-type").set_value("__none__").run()
+    [b for b in at.button if b.label.startswith("▶️")][0].click().run()
+    _wait(at)
+    assert combined() == [] and any("no combined Excel file was made" in i.value for i in at.info)

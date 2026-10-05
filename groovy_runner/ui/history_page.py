@@ -50,4 +50,3 @@ def render() -> None:
                                   f"from {len(c[1].get('sources', []))} result(s)")
         p = Path(path)
         download_button(f"⬇️ {p.name}", lambda p=p: p.read_bytes(), p.name, source_paths=[str(p)], key="dl_history_combined")
-

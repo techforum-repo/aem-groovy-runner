@@ -60,7 +60,7 @@ def damB = new Res(path: "/content/dam/b", children: [
         img: new Res(path: "/content/dam/b/img"),
         old: new Res(path: "/content/dam/b/old"), "loose.pdf": assets.find { it.path.endsWith("loose.pdf") },
         "jcr:content": new Res(path: "/content/dam/b/jcr:content", type: "nt:unstructured")])
-def resources = ["/content": contentFolder, "/content/dam/b": damB, "/content/dam/it's": new Res(path: "/content/dam/it's")]
+def resources = ["/content/site": contentFolder.children.site, "/content": contentFolder, "/content/dam/b": damB, "/content/dam/it's": new Res(path: "/content/dam/it's")]
 
 // Minimal JCR-SQL2 interpreter for the shapes the script generates.
 def findResources = { String sql, String lang ->
