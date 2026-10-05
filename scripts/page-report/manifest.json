@@ -1,0 +1,60 @@
+{
+  "name": "Page Report",
+  "description": "Every page under a root (tree walk, root included) with status, last modified/published dates and users, template, template type, created and depth. The root can be a page (one site) or a folder such as /content (every site under it). One run per root path.",
+  "inputs": [
+    {
+      "key": "rootPath",
+      "label": "Root page paths \u2014 one per line (each produces its own file)",
+      "type": "path_list",
+      "iterate": true,
+      "required": true,
+      "must_start_with": "/content",
+      "placeholder": "/content/acme\n/content",
+      "help": "A site root (/content/acme) or a folder: /content walks every site under it."
+    },
+    {
+      "key": "excludedPaths",
+      "label": "Excluded page subtrees \u2014 one per line",
+      "type": "path_list",
+      "placeholder": "/content/acme/en/archive\n/content/experience-fragments\n/content/launches",
+      "help": "Running on /content? Experience fragments, launches, catalogs etc. are pages too: exclude what you don't want.",
+      "must_start_with": "/content"
+    },
+    {
+      "key": "includeRoot",
+      "label": "Include the root page itself",
+      "type": "bool",
+      "default": true,
+      "advanced": true
+    },
+    {
+      "key": "maxDepth",
+      "label": "Max levels below the root (0 = no limit)",
+      "type": "number",
+      "default": 0,
+      "advanced": true,
+      "help": "Counted from the root you enter: from a site root, 1 = its direct child pages; from /content, 1 = the site roots only. Use 1 or 2 for a quick look at a very large site."
+    },
+    {
+      "key": "templates",
+      "label": "Only these templates (empty = all)",
+      "type": "string_list",
+      "advanced": true,
+      "placeholder": "/conf/acme/settings/wcm/templates/content-page"
+    }
+  ],
+  "batch": {
+    "input": "rootPath",
+    "kind": "page",
+    "defaultExcludes": [
+      "/content/campaigns",
+      "/content/catalogs",
+      "/content/communities",
+      "/content/forms",
+      "/content/screens",
+      "/content/projects",
+      "/content/usergenerated"
+    ],
+    "label": "Batch: run each site under the entered path as its own run (e.g. /content \u2192 every site)"
+  }
+}

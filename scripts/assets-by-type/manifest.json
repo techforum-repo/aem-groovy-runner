@@ -1,0 +1,79 @@
+{
+  "name": "Assets by Type",
+  "description": "Find DAM assets by type (dc:format / MIME). Summary mode gives counts and total size per type (optionally per folder): start there on a large DAM. List mode gives one row per asset. Uses one indexed, streamed query, built for very large repositories.",
+  "inputs": [
+    {
+      "key": "rootPath",
+      "label": "DAM folder paths \u2014 one per line (each produces its own file)",
+      "type": "path_list",
+      "iterate": true,
+      "required": true,
+      "must_start_with": "/content/dam",
+      "placeholder": "/content/dam/acme\n/content/dam"
+    },
+    {
+      "key": "formats",
+      "label": "Asset types (empty = all). Exact MIME or wildcard, one per line",
+      "type": "string_list",
+      "placeholder": "application/pdf\nimage/*\nvideo/*",
+      "help": "Matched against dc:format, which the DAM index covers. Wildcards: image/*, video/*, application/vnd.*"
+    },
+    {
+      "key": "mode",
+      "label": "Output",
+      "type": "select",
+      "options": [
+        "summary",
+        "list"
+      ],
+      "default": "summary",
+      "help": "summary = counts and total size per type (small, fast to read). list = one row per asset (can be very large)."
+    },
+    {
+      "key": "groupByFolderLevels",
+      "label": "Summary: group by folder, levels below the root (0 = no folder grouping)",
+      "type": "number",
+      "default": 0,
+      "advanced": true
+    },
+    {
+      "key": "maxAssets",
+      "label": "List: max rows (0 = no limit)",
+      "type": "number",
+      "default": 0,
+      "advanced": true,
+      "help": "A safety cap for very large results. Matched assets are still counted in full."
+    },
+    {
+      "key": "queryPerFolder",
+      "label": "One query per top-level folder (whole DAM / very large folders)",
+      "type": "bool",
+      "default": false,
+      "advanced": true,
+      "help": "AEM limits how many nodes one query may read (commonly 100,000). Tick this when running on /content/dam or any folder with more assets than that: each top-level subfolder is queried separately, in the same run."
+    },
+    {
+      "key": "excludedFolders",
+      "label": "Excluded folders \u2014 one per line",
+      "type": "path_list",
+      "advanced": true,
+      "must_start_with": "/content/dam"
+    }
+  ],
+  "batch": {
+    "input": "rootPath",
+    "kind": "folder",
+    "defaultExcludes": [
+      "/content/dam/projects",
+      "/content/dam/collections",
+      "/content/dam/formsanddocuments",
+      "/content/dam/formsanddocuments-fdmodels",
+      "/content/dam/screens",
+      "/content/dam/workflow",
+      "/content/dam/catalogs",
+      "/content/dam/core-components-examples",
+      "/content/dam/we-retail"
+    ],
+    "label": "Batch: run each top-level folder under the entered path as its own run (e.g. /content/dam)"
+  }
+}

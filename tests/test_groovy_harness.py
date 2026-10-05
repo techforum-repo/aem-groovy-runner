@@ -1,0 +1,210 @@
+"""Runs the real bundled Groovy scripts on a JVM against stub AEM APIs
+(tests/groovy_harness). Skipped unless GROOVY_JARS points at groovy +
+groovy-json jars, e.g.
+GROOVY_JARS=~/jars/groovy-4.0.22.jar:~/jars/groovy-json-4.0.22.jar pytest
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from groovy_runner import readonly
+from groovy_runner.groovy_script import build_script, parse_output, split_payload
+from groovy_runner.scripts_registry import discover, expand_runs
+
+HARNESS = Path(__file__).parent / "groovy_harness"
+JARS = os.environ.get("GROOVY_JARS", "")
+pytestmark = pytest.mark.skipif(not JARS or not shutil.which("java"), reason="GROOVY_JARS / java not available")
+
+ROOT = "/content/dam/acme/Inter Cardio"
+SCRIPTS = {s.id: s for s in discover()}
+
+
+@pytest.fixture(scope="module")
+def classes(tmp_path_factory):
+    out = tmp_path_factory.mktemp("classes")
+    subprocess.run(["java", "-cp", JARS, "org.codehaus.groovy.tools.FileSystemCompiler", "-d", str(out),
+                    *map(str, sorted((HARNESS / "stubs").glob("*.groovy")))], check=True)
+    return out
+
+
+def _run(classes, tmp_path, script_id: str, values: dict):
+    script = SCRIPTS[script_id]
+    [(_, _, config)] = expand_runs(script, values)
+    path = tmp_path / "script.groovy"
+    path.write_text(readonly.prepare(build_script(script.template(), config)))  # exactly what is sent
+    proc = subprocess.run(["java", "-cp", f"{JARS}:{classes}", "groovy.ui.GroovyMain", str(HARNESS / "Harness.groovy"), str(path)],
+                          capture_output=True, text=True, check=True)
+    return split_payload(parse_output(proc.stdout))
+
+
+def test_asset_exclusions_format_filter_and_encoded_fallback(classes, tmp_path):
+    rows, meta = _run(classes, tmp_path, "asset-reference-report", {
+        "parentDamPath": [ROOT + "/"], "excludedAssetFolders": [ROOT + "/archive"], "assetFormats": ["application/PDF"]})
+    assert meta["skippedExcludedFolder"] == 1 and meta["skippedFormat"] == 1
+    refs = {(r["assetPath"].rsplit("/", 1)[-1], r["referenceUrl"], r["pageStatus"]) for r in rows}
+    # /content/dam/other is dropped by the default excluded reference root; b.pdf only matches via %20.
+    assert refs == {("a.pdf", "/content/site/en/page1", "Modified"), ("b.pdf", "/content/site/en/gone", "Inactive")}
+
+
+def test_asset_unreferenced_toggle_and_no_excluded_roots(classes, tmp_path):
+    rows, _ = _run(classes, tmp_path, "asset-reference-report", {
+        "parentDamPath": [ROOT], "excludedReferenceRoots": [], "includeUnreferenced": False})
+    assert all(r["pageStatus"] != "No Reference" for r in rows)
+    assert "/content/dam/other" in {r["referenceUrl"] for r in rows}
+
+
+def test_asset_missing_path_reports_error(classes, tmp_path):
+    _, meta = _run(classes, tmp_path, "asset-reference-report", {"parentDamPath": ["/content/dam/nope"]})
+    assert "not found" in meta["error"]
+
+
+GUARD_CASES = {
+    "read": ('println session.getUserID()\nprintln pageManager.getPage("/a")\nprintln resourceResolver.getResource("/b")\n', None),
+    "save": ("session.save()\n", "save"),
+    "commit": ("resourceResolver.commit()\n", "commit"),
+    "create": ('resourceResolver.create(null, "x", [:])\n', "create"),
+    "page-delete": ('pageManager.delete(pageManager.getPage("/a"), false)\n', "delete"),
+    "aliased": ("def s = session\ns.save()\n", "save"),
+    "in-closure": ("[1].each { session.save() }\n", "save"),
+}
+
+
+@pytest.fixture(scope="module")
+def java_stubs(tmp_path_factory):
+    if not shutil.which("javac"):
+        pytest.skip("javac not available")
+    out = tmp_path_factory.mktemp("javastubs")
+    subprocess.run(["javac", "-d", str(out), str(HARNESS / "java" / "JavaStubs.java")], check=True)
+    return out
+
+
+@pytest.mark.parametrize("mode", ["groovy", "java"])
+@pytest.mark.parametrize("case", list(GUARD_CASES))
+def test_runtime_guard_blocks_writes_on_groovy_and_java_objects(java_stubs, tmp_path, mode, case):
+    """The static check would already reject these; this proves the second
+    layer (the injected guard) also stops them inside the script."""
+    body, blocked = GUARD_CASES[case]
+    path = tmp_path / "g.groovy"
+    path.write_text(readonly._insert_after_imports(body, readonly.GUARD))
+    proc = subprocess.run(["java", "-cp", f"{JARS}:{java_stubs}", "groovy.ui.GroovyMain",
+                           str(HARNESS / "GuardHarness.groovy"), str(path), mode], capture_output=True, text=True, check=True)
+    calls = proc.stdout.split("CALLS=")[-1]
+    if blocked:
+        assert f"OUTCOME=blocked: Groovy Runner read-only mode: {blocked}() is blocked" in proc.stdout
+        assert blocked not in calls.replace("getPage", "")
+    else:
+        assert "OUTCOME=completed" in proc.stdout and "getResource" in calls and "getPage" in calls
+
+
+def _run_content(classes, tmp_path, script_id, values):
+    script = SCRIPTS[script_id]
+    [(_, _, config)] = expand_runs(script, values)
+    path = tmp_path / "script.groovy"
+    path.write_text(readonly.prepare(build_script(script.template(), config)))
+    proc = subprocess.run(["java", "-cp", f"{JARS}:{classes}", "groovy.ui.GroovyMain",
+                           str(HARNESS / "ContentHarness.groovy"), str(path)], capture_output=True, text=True, check=True)
+    rows, meta = split_payload(parse_output(proc.stdout))
+    sql = [line[4:] for line in proc.stdout.splitlines() if line.startswith("SQL=")]
+    return rows, meta, sql
+
+
+def test_page_report_tree_walk_columns_and_filters(classes, tmp_path):
+    rows, meta, _ = _run_content(classes, tmp_path, "page-report", {"rootPath": ["/content/site"]})
+    assert [r["Path"] for r in rows] == ["/content/site", "/content/site/en", "/content/site/en/products",
+                                         "/content/site/en/products/x", "/content/site/en/archive"]
+    assert list(rows[0]) == ["Path", "Title", "Status", "Last Modified", "Last Published", "Last Modified By",
+                             "Last Published By", "Template", "Template Type", "Created", "Created By", "Depth"]
+    en = rows[1]
+    assert (en["Status"], en["Template Type"], en["Depth"]) == ("Modified", "Legacy Template", 3)
+    assert rows[4]["Title"] == "archive"  # no jcr:title -> page name, like the original script
+
+    rows, _, _ = _run_content(classes, tmp_path, "page-report", {
+        "rootPath": ["/content/site"], "excludedPaths": ["/content/site/en/archive"], "includeRoot": False,
+        "maxDepth": 2, "templates": ["/conf/s/product"]})
+    assert [r["Path"] for r in rows] == ["/content/site/en/products"]
+
+
+def test_page_report_missing_root(classes, tmp_path):
+    _, meta, _ = _run_content(classes, tmp_path, "page-report", {"rootPath": ["/content/nope"]})
+    assert "Path not found" in meta["error"]
+
+
+def test_assets_by_type_summary_list_and_sql(classes, tmp_path):
+    rows, meta, sql = _run_content(classes, tmp_path, "assets-by-type", {
+        "rootPath": ["/content/dam/b"], "formats": ["application/pdf", "image/*"],
+        "excludedFolders": ["/content/dam/b/old"]})
+    assert "dc:format] = 'application/pdf'" in sql[0] and "LIKE 'image/%'" in sql[0]
+    assert "NOT ISDESCENDANTNODE(a, '/content/dam/b/old')" in sql[0]
+    assert meta["matchedAssets"] == 5 and meta["mode"] == "summary"
+    assert {r["Format"]: (r["Assets"], r["Total Size (MB)"]) for r in rows} == {
+        "application/pdf": (3, 4.0), "image/png": (1, 1.0), "image/jpeg": (1, 0.5)}
+
+    rows, _, _ = _run_content(classes, tmp_path, "assets-by-type", {
+        "rootPath": ["/content/dam/b"], "formats": ["application/pdf"], "groupByFolderLevels": 1})
+    assert {(r["Folder"], r["Format"], r["Assets"]) for r in rows} == {
+        ("/content/dam/b/a", "application/pdf", 2), ("/content/dam/b/old", "application/pdf", 1),
+        ("/content/dam/b", "application/pdf", 1)}
+
+    rows, meta, _ = _run_content(classes, tmp_path, "assets-by-type", {
+        "rootPath": ["/content/dam/b"], "mode": "list", "maxAssets": 2})
+    assert len(rows) == 2 and meta["matchedAssets"] == 6 and meta["truncatedAt"] == 2
+    assert rows[0]["Size (bytes)"] == 2_097_152 and rows[0]["Folder"] == "/content/dam/b/a"
+
+
+def test_assets_by_type_quotes_in_path_are_escaped(classes, tmp_path):
+    _, _, sql = _run_content(classes, tmp_path, "assets-by-type", {"rootPath": ["/content/dam/it's"]})
+    assert "ISDESCENDANTNODE(a, '/content/dam/it''s')" in sql[0]  # SQL2 quote doubled, not injectable
+
+
+def test_page_report_on_a_folder_walks_every_site(classes, tmp_path):
+    rows, meta, _ = _run_content(classes, tmp_path, "page-report", {"rootPath": ["/content"]})
+    paths = [r["Path"] for r in rows]
+    assert paths[0] == "/content/site" and "/content/other" in paths and "/content" not in paths
+    assert len(paths) == 6 and meta["rootIsFolder"] is True and meta["sitesWalked"] == 2
+    # Depth counts from the folder: site roots are level 1 below /content.
+    rows, _, _ = _run_content(classes, tmp_path, "page-report", {"rootPath": ["/content"], "maxDepth": 1})
+    assert [r["Path"] for r in rows] == ["/content/site", "/content/other"]
+    rows, _, _ = _run_content(classes, tmp_path, "page-report", {"rootPath": ["/content"], "maxDepth": 2})
+    assert [r["Path"] for r in rows] == ["/content/site", "/content/site/en", "/content/other"]
+
+
+def test_assets_query_per_folder_matches_single_query(classes, tmp_path):
+    values = {"rootPath": ["/content/dam/b"], "formats": ["application/pdf", "image/*"]}
+    single, single_meta, single_sql = _run_content(classes, tmp_path, "assets-by-type", values)
+    split, split_meta, split_sql = _run_content(classes, tmp_path, "assets-by-type", {**values, "queryPerFolder": True})
+    assert sorted(map(str, split)) == sorted(map(str, single)) and split_meta["matchedAssets"] == single_meta["matchedAssets"]
+    assert len(single_sql) == 1 and split_meta["queriesRun"] == 3 and len(split_sql) == 3  # a, img, old
+    assert all("ISDESCENDANTNODE(a, '/content/dam/b/" in q for q in split_sql)
+    _, excl_meta, excl_sql = _run_content(classes, tmp_path, "assets-by-type", {
+        **values, "queryPerFolder": True, "excludedFolders": ["/content/dam/b/old"]})
+    assert excl_meta["queriesRun"] == 2 and excl_meta["matchedAssets"] == 5
+
+
+def _discover(classes, tmp_path, config):
+    from groovy_runner.runner import DISCOVER_TEMPLATE
+    path = tmp_path / "discover.groovy"
+    path.write_text(readonly.prepare(build_script(DISCOVER_TEMPLATE.read_text(), config)))
+    proc = subprocess.run(["java", "-cp", f"{JARS}:{classes}", "groovy.ui.GroovyMain",
+                           str(HARNESS / "ContentHarness.groovy"), str(path)], capture_output=True, text=True, check=True)
+    return parse_output(proc.stdout)
+
+
+def test_discovery_finds_site_pages_and_dam_folders(classes, tmp_path):
+    sites = _discover(classes, tmp_path, {"root": "/content", "kind": "page", "excludes": [], "levels": 1})
+    assert sites["children"] == ["/content/other", "/content/site"]  # /content/dam is a folder, not a page
+
+    sites = _discover(classes, tmp_path, {"root": "/content", "kind": "page", "excludes": ["/content/other"], "levels": 1})
+    assert sites["children"] == ["/content/site"] and sites["skipped"] == ["/content/other"]
+
+    folders = _discover(classes, tmp_path, {"root": "/content/dam/b", "kind": "folder",
+                                            "excludes": ["/content/dam/b/old"], "levels": 1})
+    assert folders["children"] == ["/content/dam/b/a", "/content/dam/b/img"]  # jcr:content ignored
+    assert folders["skipped"] == ["/content/dam/b/old"] and folders["looseItems"] == 1  # loose.pdf
+
+    assert "Path not found" in _discover(classes, tmp_path, {"root": "/content/nope", "kind": "folder",
+                                                             "excludes": [], "levels": 1})["error"]

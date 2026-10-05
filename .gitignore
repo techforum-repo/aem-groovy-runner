@@ -1,0 +1,105 @@
+# ==========================
+# Python
+# ==========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ==========================
+# Virtual Environments
+# ==========================
+.venv/
+venv/
+env/
+
+# ==========================
+# Environment Variables
+# ==========================
+.env
+.env.*
+!.env.example
+
+# ==========================
+# Log Files
+# ==========================
+logs/
+*.log
+
+# ==========================
+# Streamlit
+# ==========================
+.streamlit/secrets.toml
+
+# ==========================
+# Pytest / Coverage
+# ==========================
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# ==========================
+# Type Checking / Lint
+# ==========================
+.mypy_cache/
+.ruff_cache/
+
+# ==========================
+# IDE
+# ==========================
+.vscode/
+.idea/
+
+# ==========================
+# OS Files
+# ==========================
+.DS_Store
+Thumbs.db
+
+# ==========================
+# Temporary Files
+# ==========================
+*.tmp
+*.bak
+*.swp
+
+# ==========================
+# App data: run outputs, history/audit DB, logs
+# ==========================
+# Run results (JSON, executed .groovy, Excel), per session/script/run
+/output/
+# SQLite history + audit trail + presets + settings, incl. WAL/journal sidecars
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+# Stray exports/downloads dropped in the project
+*.xlsx
+*.xls
+*.csv
+*.zip
+
+# ==========================
+# Secrets: AEM technical account / tokens
+# ==========================
+# Service credentials saved from the Settings page (holds a private key)
+/credentials/
+# Service credentials JSON kept elsewhere in the tree (named per .env.example)
+*credentials*.json
+*techacct*.json
+# Private keys / certificates
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+
+# ==========================
+# Groovy test harness artifacts
+# ==========================
+# groovy / groovy-json jars for tests/test_groovy_harness.py (download separately)
+*.jar
+# groovyc output from compiling the stubs
+*.class
