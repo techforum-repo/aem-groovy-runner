@@ -219,3 +219,11 @@ def test_discovery_levels_two_reports_what_no_root_covers(classes, tmp_path):
     dam = _discover(classes, tmp_path, {"root": "/content/dam/b", "kind": "folder", "excludes": [], "levels": 2})
     assert dam["children"] == ["/content/dam/b/a/sub"]
     assert set(dam["loosePaths"]) == {"/content/dam/b/a/one.pdf", "/content/dam/b/loose.pdf"}
+
+
+def test_discovery_reports_an_entered_page_root_as_uncovered(classes, tmp_path):
+    """Review fix: batching /content/site runs its child pages; the site page itself is in no run."""
+    site = _discover(classes, tmp_path, {"root": "/content/site", "kind": "page", "excludes": [], "levels": 1})
+    assert site["looseItems"] == 1 and site["loosePaths"] == ["/content/site"]
+    folder = _discover(classes, tmp_path, {"root": "/content", "kind": "page", "excludes": [], "levels": 1})
+    assert "/content" not in folder["loosePaths"]  # a folder root has no content of its own

@@ -76,6 +76,8 @@ def _combine_per_entered_path(job: RunJob, results: list[runner.GeneratedFile],
         group = [latest[c] for c in d.children if c in latest]
         missing = [c for c in d.children if c not in latest]
         if not group:
+            job.messages.append(("warning", f"No combined file for `{d.root}`: none of its {len(d.children)} "
+                                            "root(s) succeeded. See the errors below, then Retry."))
             continue
         job.current = f"combining results for {d.root}"
         slug = slug_for_path(d.root)
