@@ -81,6 +81,11 @@ def findResources = { String sql, String lang ->
 def pm = [getPage: { String p -> pages[p] }] as PageManager
 // Anything below /content/dam/b resolves by walking its children (batch parts run on subfolders).
 def damChild = { String p -> p.startsWith("/content/dam/b/") ? damB.getChild(p.substring("/content/dam/b/".length())) : null }
-def resolver = [getResource: { String p -> resources[p] ?: damChild(p) ?: pages[p]?.content }, findResources: findResources,
+// Like AEM: a page path gives the page resource (adaptable to Page), "<page>/jcr:content" its content.
+def pageResource = { String p ->
+    if (pages[p]) return new Res(path: p, page: pages[p], type: "cq:Page", children: ["jcr:content": pages[p].content])
+    p.endsWith("/jcr:content") ? pages[p - "/jcr:content"]?.content : null
+}
+def resolver = [getResource: { String p -> resources[p] ?: damChild(p) ?: pageResource(p) }, findResources: findResources,
                 adaptTo: { Class c -> c == PageManager ? pm : null }]
 new GroovyShell(new Binding(resourceResolver: resolver)).evaluate(new File(args[0]).text)

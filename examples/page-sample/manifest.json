@@ -1,0 +1,21 @@
+{
+  "name": "Sample: pages under a root",
+  "description": "Skeleton for new scripts: lists every page under a root page or folder. Batch-ready without any batching code.",
+  "inputs": [
+    {
+      "key": "rootPath",
+      "label": "Root paths — one per line (each produces its own file)",
+      "type": "path_list",
+      "iterate": true,
+      "required": true,
+      "must_start_with": "/content",
+      "placeholder": "/content/acme\n/content"
+    },
+    {
+      "key": "excludedPaths",
+      "label": "Excluded page subtrees — one per line",
+      "type": "path_list",
+      "must_start_with": "/content"
+    }
+  ]
+}

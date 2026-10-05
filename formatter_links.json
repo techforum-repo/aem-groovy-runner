@@ -1,8 +1,7 @@
 {
   "asset-reference-report": {
     "formatters": [
-      "asset-reference-excel",
-      "generic-excel"
+      "asset-reference-excel"
     ],
     "default": "asset-reference-excel"
   },

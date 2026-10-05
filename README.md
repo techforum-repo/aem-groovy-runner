@@ -109,6 +109,13 @@ rows are saved as the result file and the other keys show as run details;
 first output line starting with `[` or `{` is parsed, so an unmodified
 console script that prints `Total rows generated: N` and then JSON is fine.
 
+**Starting a new script:** copy a sample to `scripts/<your-script-id>/` and
+change its report logic: `examples/asset-sample/` (DAM assets under a folder)
+or `examples/page-sample/` (pages under a root). Each is a complete, annotated
+skeleton (inputs, output markers, error handling) that already meets the Batch
+requirements below. The Scripts page shows both under "Adding a script", one
+tab each.
+
 **Writing a script that supports Batch.** Batching is done by the app, so a
 script needs no batching code. It's offered automatically when the script:
 
