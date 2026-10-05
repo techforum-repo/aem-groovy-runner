@@ -56,13 +56,25 @@ def test_dam_fields_require_content_dam_and_check_whole_segments():
 
 
 def test_batch_skips_follow_the_main_path_prefix():
-    from groovy_runner.scripts_registry import validate_batch
+    from groovy_runner.scripts_registry import validate_skips
     scripts = {s.id: s for s in discover()}
-    assert validate_batch(scripts["assets-by-type"], ["/content/dam/projects"]) == []
-    assert validate_batch(scripts["assets-by-type"], ["/content/projects"])
-    assert validate_batch(scripts["page-report"], ["/content/campaigns"]) == []
-    assert validate_batch(scripts["page-report"], ["/etc/x"])
+    assert validate_skips(scripts["assets-by-type"], ["/content/dam/projects"]) == []
+    assert validate_skips(scripts["assets-by-type"], ["/content/projects"])
+    assert validate_skips(scripts["page-report"], ["/content/campaigns"]) == []
+    assert validate_skips(scripts["page-report"], ["/etc/x"])
     for script in scripts.values():  # shipped defaults satisfy their own rule
-        if script.batch:
-            assert validate_batch(script, list(script.batch.default_excludes)) == [], script.id
-    assert "/content/dam" not in scripts["page-report"].batch.default_excludes  # never a page: no-op exclude removed
+        assert script.system_excludes and validate_skips(script, list(script.system_excludes.paths)) == [], script.id
+    assert "/content/dam" not in scripts["page-report"].system_excludes.paths  # never a page: no-op exclude removed
+
+
+def test_system_skips_merge_into_the_scripts_own_exclusions():
+    from groovy_runner.scripts_registry import with_skips
+    scripts = {s.id: s for s in discover()}
+    merged = with_skips(scripts["assets-by-type"], {"rootPath": ["/content/dam"], "excludedFolders": ["/content/dam/x"]},
+                        ["/content/dam/projects/", "/content/dam/x"])
+    assert merged["excludedFolders"] == ["/content/dam/x", "/content/dam/projects"]  # normalized, de-duplicated
+    assert with_skips(scripts["assets-by-type"], {"rootPath": ["/content/dam"]}, []) == {"rootPath": ["/content/dam"]}
+    runs = expand_runs(scripts["asset-reference-report"],
+                       with_skips(scripts["asset-reference-report"], {"parentDamPath": ["/content/dam"]},
+                                  ["/content/dam/collections"]))
+    assert runs[0][2]["excludedAssetFolders"] == ["/content/dam/collections"]  # reaches the Groovy CONFIG

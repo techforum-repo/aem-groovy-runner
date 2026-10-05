@@ -46,7 +46,11 @@
   "batch": {
     "input": "rootPath",
     "kind": "page",
-    "defaultExcludes": [
+    "label": "Batch: run each site under the entered path as its own run (e.g. /content \u2192 every site)"
+  },
+  "systemExcludes": {
+    "input": "excludedPaths",
+    "paths": [
       "/content/campaigns",
       "/content/catalogs",
       "/content/communities",
@@ -54,7 +58,6 @@
       "/content/screens",
       "/content/projects",
       "/content/usergenerated"
-    ],
-    "label": "Batch: run each site under the entered path as its own run (e.g. /content \u2192 every site)"
+    ]
   }
 }

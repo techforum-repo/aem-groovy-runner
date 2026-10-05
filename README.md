@@ -62,7 +62,7 @@ technical account, service credentials, or basic auth.
 | Run | Choose a script, fill its form (with per-script presets), run it, then format/preview/download **this session's** results: all Excel files individually in one click, a zip, or a single file |
 | Scripts | Every script found under `scripts/`, with its read-only check result, inputs, source, and any manifest problems; also how to add one |
 | Formatters | The formatter catalogue and the script ↔ formatter **links** grid |
-| History | All runs from every session; re-download earlier files |
+| History | All runs from every session; re-download earlier files, including combined files (one per entered path for batches) |
 | Audit | Append-only audit trail (filter + CSV export) and per-run traceability with a file-integrity check |
 | Settings | AEM author URL, mock mode, Groovy Console endpoint, timeout; how to sign in |
 | Diagnostics | Connection test, log download |
@@ -152,52 +152,86 @@ formatter by creating a module in `groovy_runner/formatters/` that exposes
 `FORMATTER` and registering it in `formatters/__init__.py` (this needs an
 app restart). It then appears in every script's mapping editor.
 
+## Skipped system areas
+
+Page Report, Assets by Type and Asset Reference Report skip AEM system areas
+on **every run, batch or not**: **"Skip AEM system areas"** under the inputs,
+on by default, with the list editable and a **Restore defaults** button.
+The skips are merged into the script's own excluded paths for that run, so:
+
+- **Assets by Type** never queries them: they're excluded inside the query.
+- **Asset Reference Report** skips those assets before the expensive
+  per-asset reference search.
+- **Page Report** doesn't walk those subtrees.
+
+The merged list is what's sent to AEM and recorded in the run's inputs and the
+audit trail. Defaults:
+
+- **DAM reports:** `projects`, `collections`, `formsanddocuments`,
+  `formsanddocuments-fdmodels`, `screens`, `workflow`, `catalogs`, and the AEM
+  sample folders.
+- **Page Report:** the system areas that can be pages (`campaigns`, `catalogs`,
+  `communities`, `forms`, `screens`, `projects`, `usergenerated`). Non-page
+  areas (`/content/dam`, the experience-fragments and launches roots,
+  `cq:tags`) are never treated as sites anyway.
+
+Skips must sit under the script's main path (`/content/dam` for the DAM
+reports, `/content` for pages), checked by whole path segment. They're set
+in the manifest:
+
+```json
+"systemExcludes": {"input": "excludedFolders", "paths": ["/content/dam/projects", "..."]}
+```
+
+`input` names the script's own excluded-paths input that the skips merge into.
+
 ## Whole-repository runs (batching)
 
 Running a report on all of `/content` or `/content/dam` in one request is
 risky: a long open request, large memory use in AEM, huge output, and AEM's
-per-query read limit (commonly 100,000 nodes). Page Report, Assets by Type
-and Asset Reference Report offer **Batch** instead (a checkbox under their
-inputs):
+per-query read limit (commonly 100,000 nodes). The same three scripts offer
+**Batch** (a checkbox under their inputs):
 
 1. **Discover:** one small read-only request lists the roots under each entered
    path: child **pages** for Page Report (each site under `/content`), child
    **folders** for the DAM reports (each top-level folder under `/content/dam`).
-2. **Skip:** system areas are skipped by default, listed and editable in the
-   form. Page Report only discovers *pages*, so non-page areas (`/content/dam`,
-   the experience-fragments and launches roots, `cq:tags`) are never picked up
-   and need no entry. Its defaults are the system areas that can be pages
-   (`campaigns`, `catalogs`, `communities`, `forms`, `screens`, `projects`,
-   `usergenerated`). The DAM reports skip `projects`, `collections`,
-   `formsanddocuments`, `screens`, `workflow`, and so on. Skips must sit under
-   the script's main path: `/content/dam` for the DAM reports, `/content` for
-   pages. Every DAM path field (folders, exclusions, skips) requires
-   `/content/dam`, checked by whole path segment, so `/content/damage` is rejected.
-   **Restore default skips** puts the defaults back. **Levels** = 2 goes one
-   level deeper when a single top-level root is itself too big.
-3. **Run:** the script runs **once per discovered root**: small requests, live
-   progress, Cancel and Retry per root, one result per root.
-4. **Combine (optional):** in the Format step, **Combine selected into one
-   file** merges the selected results into a single Excel file (Excel's
-   1,048,575-row limit is checked, with a clear message).
+   Your excluded paths and the skipped system areas are skipped here too, so
+   they never become a run.
+2. **Run:** the script runs **once per discovered root**: small requests, live
+   progress, Cancel and Retry per root.
+3. **One file per entered path:** batching only changes how the work is split,
+   not what you get. The roots' results are **combined automatically** into one
+   file per path you entered. After a **Retry** of failed or cancelled roots,
+   that file is rebuilt to include them, using only that batch's own earlier
+   results; a new run never borrows results from a different run. Combined files
+   are also listed on **History**, so they survive a page refresh. If the combined rows would exceed
+   Excel's 1,048,575-row limit, each root is formatted separately instead,
+   with a message saying so.
 
-After a batch, a note lists what was discovered and skipped. It warns if items
-sit directly in the entered path, outside every discovered root, since those
-aren't covered: run that path without batching to include them. Discovery is
+**Levels below the entered path** sets where the work is split: 1 = each
+direct child (each site under `/content`, each top-level DAM folder); 2 = each
+child of those, for when one top-level folder is too big. At 2+, whatever
+sits *in* the level-1 folders is in no run: assets next to the subfolders, or
+each site's own home page.
+
+After a batch, a note lists what was discovered and skipped, and any items
+outside every discovered root, since the batch doesn't cover those. Lower
+Levels, or run those paths without batching, to include them. Discovery is
 audited (`run.batch_discovered`), as is combining (`format.combined`, with the
 source runs' hashes).
 
-Batch is controlled by the manifest:
+Batch is enabled per script in the manifest (`kind` is `page` or `folder`;
+`input` must be the script's one-run-per-line input):
 
 ```json
-"batch": {"input": "rootPath", "kind": "page", "defaultExcludes": ["/content/dam", "..."], "label": "..."}
+"batch": {"input": "rootPath", "kind": "page", "label": "..."}
 ```
 
-`kind` is `page` or `folder`, and `input` must be the script's one-run-per-line
-input. Without batching, Page Report also accepts a folder root (`/content`
-walks every site in one run), and Assets by Type can run **one query per
-top-level folder** inside a single run. Both are fine for medium sizes;
-batching is the safer choice for the whole repository.
+Without batching, Page Report also accepts a folder root (`/content` walks
+every site in one run), and Assets by Type can run **one query per top-level
+folder** inside a single run. Both are fine for medium sizes; batching is the
+safer choice for the whole repository. You can still combine any selected
+results by hand in the Format step (**Combine selected into one file**).
 
 ## Read-only enforcement
 

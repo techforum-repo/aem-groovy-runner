@@ -54,7 +54,11 @@
   "batch": {
     "input": "parentDamPath",
     "kind": "folder",
-    "defaultExcludes": [
+    "label": "Batch: run each top-level folder under the entered path as its own run (e.g. /content/dam)"
+  },
+  "systemExcludes": {
+    "input": "excludedAssetFolders",
+    "paths": [
       "/content/dam/projects",
       "/content/dam/collections",
       "/content/dam/formsanddocuments",
@@ -64,7 +68,6 @@
       "/content/dam/catalogs",
       "/content/dam/core-components-examples",
       "/content/dam/we-retail"
-    ],
-    "label": "Batch: run each top-level folder under the entered path as its own run (e.g. /content/dam)"
+    ]
   }
 }
