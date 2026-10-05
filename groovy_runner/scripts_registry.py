@@ -54,11 +54,31 @@ BATCH_KINDS = ("page", "folder")
 
 @dataclass(frozen=True)
 class BatchDef:
-    """Manifest "batch": discover roots under each entered path, then run the
-    script once per root. `input` is the iterate input the roots replace."""
+    """Batching is done by the app, never by the script: discover the parts
+    under each entered path, then run the unchanged script once per part,
+    setting `input` (the iterate input) to that part. A part that must cover
+    only the content sitting directly at a path (assets directly in a folder,
+    a page's own row) is run with its children added to `exclude_input`, the
+    script's own excluded-paths input. `include_root_input` (optional, a bool
+    input) says whether the entered root's own content is wanted: the app
+    forces it on for the parts, which are roots only internally."""
     input: str
     kind: str  # "page" (child pages, e.g. sites) | "folder" (child folders, e.g. DAM folders)
+    exclude_input: str
     label: str = ""
+    include_root_input: str = ""
+    # Inputs measured from the root (a depth, a row cap...) mean something different
+    # per part, so Batch is refused while any of them is set (non-empty / non-zero).
+    not_with: tuple[str, ...] = ()
+    # Rows that are already totals (e.g. counts per type) are merged across parts:
+    # rows with the same `group_by` values have their `sum` columns added up.
+    merge_rows: "MergeRows | None" = None
+
+
+@dataclass(frozen=True)
+class MergeRows:
+    group_by: tuple[str, ...]
+    sum: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -112,21 +132,58 @@ def _parse_input(raw: dict[str, Any], problems: list[str]) -> InputDef | None:
     )
 
 
-def _parse_batch(raw: Any, inputs: list[InputDef], problems: list[str]) -> BatchDef | None:
-    if not raw:
+def _parse_batch(raw: Any, inputs: list[InputDef], system_input: str | None,
+                 problems: list[str]) -> BatchDef | None:
+    """Every script whose iterate input is a path list can be batched; the
+    manifest's "batch" section is only needed to override what's inferred:
+    kind (folder under /content/dam, else page), and the exclusion input
+    (systemExcludes' input, else the one other path_list input whose key or
+    label says it excludes paths; never a guess, since a wrong pick would make
+    a "direct items" part cover its whole subtree and duplicate rows).
+    "batch": false switches batching off for a script."""
+    if raw is False:
         return None
+    raw = raw or {}
     if not isinstance(raw, dict):
-        problems.append('"batch" must be an object')
+        problems.append('"batch" must be an object or false')
         return None
-    target = next((i for i in inputs if i.key == raw.get("input")), None)
-    if target is None or not target.iterate:
-        problems.append(f'"batch.input" must name an input with iterate=true (got {raw.get("input")!r})')
+    explicit = bool(raw)
+    key = raw.get("input") or next((i.key for i in inputs if i.iterate and i.type == "path_list"), None)
+    target = next((i for i in inputs if i.key == key), None)
+    if target is None or not target.iterate or target.type != "path_list":
+        if explicit:
+            problems.append(f'"batch.input" must name a path_list input with iterate=true (got {raw.get("input")!r})')
         return None
-    kind = str(raw.get("kind") or "")
+    kind = str(raw.get("kind") or ("folder" if under(target.must_start_with or "/", "/content/dam") else "page"))
     if kind not in BATCH_KINDS:
         problems.append(f'"batch.kind" must be one of {", ".join(BATCH_KINDS)} (got {kind!r})')
         return None
-    return BatchDef(input=target.key, kind=kind, label=str(raw.get("label") or ""))
+    others = [i for i in inputs if i.type == "path_list" and i.key != target.key]
+    named = [i.key for i in others if "exclud" in f"{i.key} {i.label}".lower()]
+    exclude = raw.get("excludeInput") or system_input or (named[0] if len(named) == 1 else None)
+    if exclude not in [i.key for i in others]:
+        if explicit:
+            problems.append('"batch.excludeInput" must name the script\'s excluded-paths input (a path_list): batching '
+                            "needs it to cover content sitting directly in a folder above the split")
+        return None
+    root_input = str(raw.get("includeRootInput") or "")
+    if root_input and not any(i.key == root_input and i.type == "bool" for i in inputs):
+        problems.append(f'"batch.includeRootInput" must name a bool input (got {root_input!r})')
+        root_input = ""
+    keys = {i.key for i in inputs}
+    not_with = tuple(str(k) for k in raw.get("notWith") or [])
+    if unknown := [k for k in not_with if k not in keys]:
+        problems.append(f'"batch.notWith" names unknown inputs: {", ".join(unknown)}')
+        not_with = tuple(k for k in not_with if k in keys)
+    merge = None
+    if raw.get("mergeRows"):
+        m = raw["mergeRows"]
+        if not isinstance(m, dict) or not m.get("sum"):
+            problems.append('"batch.mergeRows" needs "sum" (columns to add up) and optionally "groupBy"')
+        else:
+            merge = MergeRows(group_by=tuple(map(str, m.get("groupBy") or [])), sum=tuple(map(str, m["sum"])))
+    return BatchDef(input=target.key, kind=kind, exclude_input=exclude, label=str(raw.get("label") or ""),
+                    include_root_input=root_input, not_with=not_with, merge_rows=merge)
 
 
 def _parse_system_excludes(raw: Any, inputs: list[InputDef], problems: list[str]) -> SystemExcludes | None:
@@ -157,8 +214,8 @@ def _load_folder(folder: Path) -> ScriptDef:
     if len({i.key for i in inputs}) != len(inputs):
         problems.append("Duplicate input keys")
     manifest_formatters = [str(f) for f in manifest.get("formatters") or []]
-    batch = _parse_batch(manifest.get("batch"), inputs, problems)
     system_excludes = _parse_system_excludes(manifest.get("systemExcludes"), inputs, problems)
+    batch = _parse_batch(manifest.get("batch"), inputs, system_excludes.input if system_excludes else None, problems)
     script = ScriptDef(
         id=folder.name, name=str(manifest.get("name") or folder.name), description=str(manifest.get("description") or ""),
         script_path=folder / "script.groovy", inputs=inputs, problems=problems,
@@ -224,6 +281,17 @@ def validate(script: ScriptDef, values: dict[str, Any]) -> list[str]:
             if bad:
                 errors.append(f"“{inp.label}”: must start with {inp.must_start_with}: " + ", ".join(bad))
     return errors
+
+
+def batch_conflicts(script: ScriptDef, values: dict[str, Any]) -> list[str]:
+    """Inputs set to something Batch can't preserve (see BatchDef.not_with)."""
+    if script.batch is None:
+        return []
+    by_key = {i.key: i for i in script.inputs}
+    bad = [by_key[k].label for k in script.batch.not_with
+           if k in by_key and normalize_value(by_key[k], values.get(k, by_key[k].empty_value())) not in ("", [], 0, 0.0, None, False)]
+    return [f"Batch can't keep “{label}” exact (it's counted from the entered path, and each part has its own root): "
+            "clear it, or untick Batch" for label in bad]
 
 
 def validate_skips(script: ScriptDef, skips: list[str]) -> list[str]:

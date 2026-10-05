@@ -31,7 +31,7 @@ from . import audit, database, formatters, readonly, settings_store
 from .config import settings
 from .groovy_script import build_script, parse_output, split_payload
 from .logging_setup import get_logger
-from .scripts_registry import ScriptDef, expand_runs
+from .scripts_registry import MergeRows, ScriptDef, expand_runs
 from .utils import harden_file_permissions, normalize_jcr_path
 
 
@@ -43,14 +43,30 @@ class ConsoleClient(Protocol):
 DISCOVER_TEMPLATE = Path(__file__).resolve().parent / "builtin" / "discover_roots.groovy"
 
 
+DIRECT_SUFFIX = " (direct items)"
+
+
+def direct_label(path: str) -> str:
+    """Run label of an internal direct-only run: only the content sitting directly
+    at `path` (assets in the folder, or the page's own row), not its subtree."""
+    return path + DIRECT_SUFFIX
+
+
 @dataclass
 class Discovery:
     root: str
-    children: list[str] = field(default_factory=list)
+    children: list[str] = field(default_factory=list)  # run with their whole subtree
+    direct: list[str] = field(default_factory=list)  # run for their direct content only
+    direct_excludes: dict[str, list[str]] = field(default_factory=dict)  # direct path -> its children to exclude
     skipped: list[str] = field(default_factory=list)
-    loose_items: int = 0
-    loose_paths: list[str] = field(default_factory=list)
     error: str = ""
+
+    @property
+    def labels(self) -> list[str]:
+        """Every run label of this entered path, in path order (a folder's direct
+        items before its subfolders)."""
+        items = [(c, c) for c in self.children] + [(d, direct_label(d)) for d in self.direct]
+        return [label for _, label in sorted(items)]
 
 
 def discover_roots(client: "ConsoleClient", root: str, kind: str, excludes: list[str], levels: int = 1,
@@ -68,8 +84,10 @@ def discover_roots(client: "ConsoleClient", root: str, kind: str, excludes: list
         return Discovery(root=root, error=str(exc))
     if not isinstance(payload, dict) or payload.get("error"):
         return Discovery(root=root, error=str((payload or {}).get("error") or "unexpected discovery output"))
-    return Discovery(root=root, children=list(payload.get("children") or []), skipped=list(payload.get("skipped") or []),
-                     loose_items=int(payload.get("looseItems") or 0), loose_paths=list(payload.get("loosePaths") or []))
+    direct = [d for d in payload.get("direct") or [] if isinstance(d, dict) and d.get("path")]
+    return Discovery(root=root, children=list(payload.get("children") or []), direct=[d["path"] for d in direct],
+                     direct_excludes={d["path"]: list(d.get("exclude") or []) for d in direct},
+                     skipped=list(payload.get("skipped") or []))
 
 
 class RunCancelled(Exception):
@@ -127,6 +145,11 @@ class GeneratedFile:
     script_sha256: str = ""
     executed_script_path: str = ""
     aem_user: str = ""
+    # Batch mode: the entered path(s) this run is a part of (two when entered paths
+    # overlap), and the id of the batch it started in (a Retry keeps it), so the
+    # parts of one entered path can be grouped.
+    groups: list[str] = field(default_factory=list)
+    origin: str = ""
 
     @property
     def ok(self) -> bool:
@@ -143,6 +166,35 @@ def session_dir(session_id: str) -> Path:
     return path
 
 
+def _batch_runs(script: ScriptDef, values: dict[str, Any],
+                discoveries: list[Discovery]) -> list[tuple[str, str, dict[str, Any]]]:
+    """The runs of a batch, all ordinary calls of the unchanged script: each
+    discovered part with its whole subtree, plus a "direct items" part for the
+    content above the split level (assets directly in the entered/intermediate
+    folders, or those pages' own rows): the script runs on that path with its
+    children added to the script's excluded paths. Together they cover
+    everything under the entered path, each item once."""
+    b = script.batch
+    runs: dict[str, tuple[str, str, dict[str, Any]]] = {}
+
+    def part(path: str, extra_excludes: list[str] | None = None) -> tuple[str, str, dict[str, Any]]:
+        [(label, slug, config)] = expand_runs(script, {**values, b.input: [path]})
+        if b.include_root_input:  # a part's own root is in no other run: keep it
+            config[b.include_root_input] = True
+        if extra_excludes:
+            config[b.exclude_input] = list(dict.fromkeys([*config.get(b.exclude_input, []), *extra_excludes]))
+        return label, slug, config
+
+    for d in discoveries:
+        for path in d.children:
+            runs.setdefault(path, part(path))
+        for path in d.direct:
+            _, slug, config = part(path, d.direct_excludes.get(path, []))
+            runs.setdefault(direct_label(path), (direct_label(path), slug + "-direct", config))
+    order = {label: i for i, label in enumerate(label for d in discoveries for label in d.labels)}
+    return sorted(runs.values(), key=lambda r: order.get(r[0], len(order)))
+
+
 def run_script(
     client: ConsoleClient,
     script: ScriptDef,
@@ -154,6 +206,7 @@ def run_script(
     cancel: threading.Event | None = None,
     batch: dict[str, Any] | None = None,
     on_discovered: Callable[[list[Discovery]], None] | None = None,
+    origin: str | None = None,
 ) -> list[GeneratedFile]:
     """`cancel`, when set from another thread, stops the batch: the run in
     flight is abandoned (see _call_with_cancel) and the rest are recorded
@@ -166,6 +219,8 @@ def run_script(
     template = script.template()
     template_sha = audit.sha256_text(template)
     results: list[GeneratedFile] = []
+    group_of: dict[str, list[str]] = {}
+    origin = origin or batch_id
     try:
         aem_user = client.identity()
     except Exception as exc:
@@ -184,21 +239,30 @@ def run_script(
                                                   int(batch.get("levels") or 1), cancel))
             except RunCancelled:
                 break
+        if script.batch.include_root_input and values.get(script.batch.include_root_input) is False:
+            for d in discoveries:  # the user doesn't want the entered root's own content: not a part at all
+                d.direct = [p for p in d.direct if p != d.root]
         if on_discovered:
             on_discovered(discoveries)
         audit.log("run.batch_discovered", session_id=session_id, aem_user=aem_user, target=script.id, details={
             "batch_id": batch_id, "kind": script.batch.kind, "excludes": batch.get("excludes"),
             "levels": batch.get("levels"),
-            "roots": [{"root": d.root, "found": len(d.children), "skipped": d.skipped, "loose_items": d.loose_items,
-                       "loose_paths": d.loose_paths, "error": d.error} for d in discoveries]})
+            "roots": [{"root": d.root, "found": len(d.children), "direct": d.direct, "skipped": d.skipped,
+                       "error": d.error} for d in discoveries]})
         for d in discoveries:
             if d.error:  # surfaces as a failed row the user can see and retry
                 results.append(GeneratedFile(run_id=0, session_id=session_id, script_id=script.id, script_name=script.name,
                                              batch_id=batch_id, label=f"{d.root} (discovery)", status="error",
-                                             error=f"Discovering roots failed: {d.error}", aem_user=aem_user))
-        values = {**values, key: list(dict.fromkeys(c for d in discoveries for c in d.children))}
+                                             error=f"Discovering roots failed: {d.error}", aem_user=aem_user,
+                                             groups=[d.root], origin=origin))
+        for d in discoveries:
+            for label in d.labels:
+                group_of.setdefault(label, []).append(d.root)
+        all_runs = _batch_runs(script, values, discoveries)
+    else:
+        all_runs = expand_runs(script, values)
 
-    runs = [r for r in expand_runs(script, values) if only_labels is None or r[0] in only_labels]
+    runs = [r for r in all_runs if only_labels is None or r[0] in only_labels]
     used: set[str] = set()
     audit.log("run.batch_started", session_id=session_id, aem_user=aem_user, target=script.id, details={
         "batch_id": batch_id, "aem_host": aem_host, "runs": [r[0] for r in runs], "inputs": values,
@@ -212,7 +276,8 @@ def run_script(
             slug, n = f"{base}-{n}", n + 1
         used.add(slug)
         result = GeneratedFile(run_id=0, session_id=session_id, script_id=script.id, script_name=script.name,
-                               batch_id=batch_id, label=label, status="error", aem_user=aem_user)
+                               batch_id=batch_id, label=label, status="error", aem_user=aem_user,
+                               groups=list(group_of.get(label, [])), origin=origin if label in group_of else "")
         started, started_at = time.monotonic(), _utc_now()
         logger.info("Run %s/%s: starting %s", script.id, batch_id, label)
         try:
@@ -271,6 +336,17 @@ def run_script(
     return results
 
 
+def batch_groups(files: list[GeneratedFile]) -> dict[tuple[str, str, str], list[GeneratedFile]]:
+    """Batch parts grouped per entered path: (script id, entered path, origin
+    batch) -> the latest result of each part (a retried part replaces its
+    earlier failure), in run order."""
+    groups: dict[tuple[str, str, str], dict[str, GeneratedFile]] = {}
+    for f in files:
+        for group in f.groups:
+            groups.setdefault((f.script_id, group, f.origin), {})[f.label] = f
+    return {key: list(parts.values()) for key, parts in groups.items()}
+
+
 def format_file(file: GeneratedFile, formatter_id: str) -> str:
     """Formats one session file; returns the output path. Raises ValueError
     when the data doesn't fit the formatter."""
@@ -302,13 +378,28 @@ def format_file(file: GeneratedFile, formatter_id: str) -> str:
     return str(out)
 
 
-def format_combined(files: list[GeneratedFile], formatter_id: str, session_id: str, *, name: str | None = None,
-                    min_files: int = 2) -> str:
-    """Formats several session results as ONE file (rows concatenated, in the
-    order given), e.g. every site of a batched page report. Returns its path."""
-    formatter = formatters.get(formatter_id)
-    if len(files) < min_files:
-        raise ValueError("select at least two results to combine")
+def merge_rows(rows: list[Any], merge: "MergeRows | None") -> list[Any]:
+    """Batch parts' rows that are already totals: same `group_by` values ->
+    one row with the `sum` columns added up. Rows without the sum columns
+    (e.g. a list-mode result) are left as they are."""
+    if merge is None or not rows or not all(isinstance(r, dict) and all(c in r for c in merge.sum) for r in rows):
+        return rows
+    merged: dict[tuple, dict[str, Any]] = {}
+    for row in rows:
+        key = tuple(row.get(c) for c in merge.group_by)
+        if key not in merged:
+            merged[key] = dict(row)
+            continue
+        for c in merge.sum:
+            total = (merged[key][c] or 0) + (row[c] or 0)
+            merged[key][c] = round(total, 2) if isinstance(total, float) else total
+    return list(merged.values())
+
+
+def load_rows(files: list[GeneratedFile], merge: "MergeRows | None" = None) -> list[Any]:
+    """The rows of several results, concatenated in order (merged when the
+    script says its rows are totals), with the same checks for preview and
+    formatting. Raises ValueError."""
     combined: list[Any] = []
     for file in files:
         if not file.ok:
@@ -319,6 +410,17 @@ def format_combined(files: list[GeneratedFile], formatter_id: str, session_id: s
         if not isinstance(data, list):
             raise ValueError(f"{file.label}: only list results (rows) can be combined")
         combined.extend(data)
+    return merge_rows(combined, merge)
+
+
+def format_combined(files: list[GeneratedFile], formatter_id: str, session_id: str, *, name: str | None = None,
+                    min_files: int = 2, merge: "MergeRows | None" = None) -> str:
+    """Formats several session results as ONE file (rows concatenated, in the
+    order given), e.g. every site of a batched page report. Returns its path."""
+    formatter = formatters.get(formatter_id)
+    if len(files) < min_files:
+        raise ValueError("select at least two results to combine")
+    combined = load_rows(files, merge)
     problem = formatter.check(combined)
     if problem:
         raise ValueError(f"{formatter.name} {problem}")

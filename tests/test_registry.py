@@ -78,3 +78,37 @@ def test_system_skips_merge_into_the_scripts_own_exclusions():
                        with_skips(scripts["asset-reference-report"], {"parentDamPath": ["/content/dam"]},
                                   ["/content/dam/collections"]))
     assert runs[0][2]["excludedAssetFolders"] == ["/content/dam/collections"]  # reaches the Groovy CONFIG
+
+
+def _write_script(tmp_path, manifest):
+    folder = tmp_path / "s"
+    folder.mkdir(parents=True)
+    (folder / "script.groovy").write_text('def CONFIG = "__CONFIG_B64__"\n')
+    (folder / "manifest.json").write_text(json.dumps(manifest))
+    [script] = discover(tmp_path)
+    return script
+
+
+def test_batching_is_inferred_for_any_path_script_with_an_exclusion_input(tmp_path):
+    """A new script needs no batching code and no batch section: the app infers it."""
+    script = _write_script(tmp_path, {"inputs": [
+        {"key": "folders", "type": "path_list", "iterate": True, "must_start_with": "/content/dam"},
+        {"key": "skip", "label": "Excluded folders", "type": "path_list"}]})
+    assert script.problems == []
+    assert (script.batch.input, script.batch.kind, script.batch.exclude_input) == ("folders", "folder", "skip")
+
+
+def test_no_batching_without_an_exclusion_input_or_when_switched_off(tmp_path):
+    inputs = [{"key": "pages", "type": "path_list", "iterate": True, "must_start_with": "/content"}]
+    excl = {"key": "excludedPaths", "type": "path_list"}
+    assert _write_script(tmp_path / "a", {"inputs": inputs}).batch is None  # nowhere to put a part's children
+    # Review fix: another path list that doesn't say it excludes (e.g. reference roots) is never guessed.
+    assert _write_script(tmp_path / "d", {"inputs": [*inputs, {"key": "refRoots", "type": "path_list"}]}).batch is None
+    assert _write_script(tmp_path / "b", {"inputs": [*inputs, excl]}).batch.kind == "page"
+    assert _write_script(tmp_path / "c", {"inputs": [*inputs, excl], "batch": False}).batch is None
+
+
+def test_explicit_batch_section_is_validated(tmp_path):
+    script = _write_script(tmp_path, {"inputs": [{"key": "p", "type": "path_list", "iterate": True}],
+                                      "batch": {"kind": "page"}})
+    assert script.batch is None and any("excludeInput" in p for p in script.problems)

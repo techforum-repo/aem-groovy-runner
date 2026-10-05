@@ -33,6 +33,7 @@ link formatters to it on the **Formatters** page (it shows as "not linked" until
   "description": "What it does",
   "inputs": [
     {{"key": "rootPath", "label": "Root paths", "type": "path_list", "iterate": true, "required": true}},
+    {{"key": "excludedPaths", "label": "Excluded paths", "type": "path_list"}},
     {{"key": "includeDrafts", "label": "Include drafts", "type": "bool", "default": false, "advanced": true}}
   ]
 }}
@@ -40,6 +41,13 @@ link formatters to it on the **Formatters** page (it shows as "not linked" until
 
 Input types: `text`, `path`, `path_list`, `string_list`, `bool`, `number`, `select` (with `options`).
 `iterate: true` on a list input means one run (and one output file) per line.
+
+**Batch** (for large paths) is done by the app, not the script: no batching code is needed. It's offered
+automatically when the script has an `iterate` path list **and** an excluded-paths input (a path list whose key
+or label contains "exclude", or the one named in `systemExcludes`), and the script **skips the whole subtree**
+under each excluded path. The app may add paths there itself (to cover only the content directly in a folder).
+Options counted from the entered path go in `"batch": {{"notWith": [...]}}`; rows that are totals in
+`"batch": {{"mergeRows": {{"groupBy": [...], "sum": [...]}}}}`. `"batch": false` turns Batch off.
 A plain `.groovy` file without a manifest also works: it has no inputs, and its JSON output is found
 even without markers (the first line starting with `[` or `{{`).
 '''
@@ -80,6 +88,15 @@ def render() -> None:
                 } for i in script.inputs]), width="stretch", hide_index=True)
             else:
                 st.caption("No inputs.")
+            if script.batch:
+                b = script.batch
+                st.caption(f"Batch: available ({'pages' if b.kind == 'page' else 'folders'}; parts' exclusions go "
+                           f"into `{b.exclude_input}`"
+                           + (f"; not with {', '.join(f'`{k}`' for k in b.not_with)}" if b.not_with else "")
+                           + ("; totals merged across parts" if b.merge_rows else "") + ")")
+            elif script.iterate_input and script.iterate_input.type == "path_list":
+                st.caption("Batch: not available (no excluded-paths input to cover a folder's direct content; "
+                           "see “Adding a script” below)")
             if script.script_path.exists():
                 st.code(script.template(), language="groovy")
 

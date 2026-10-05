@@ -32,9 +32,10 @@ def classes(tmp_path_factory):
     return out
 
 
-def _run(classes, tmp_path, script_id: str, values: dict):
+def _run(classes, tmp_path, script_id: str, values: dict, extra: dict | None = None):
     script = SCRIPTS[script_id]
     [(_, _, config)] = expand_runs(script, values)
+    config.update(extra or {})  # internal settings such as batching's directOnly
     path = tmp_path / "script.groovy"
     path.write_text(readonly.prepare(build_script(script.template(), config)))  # exactly what is sent
     proc = subprocess.run(["java", "-cp", f"{JARS}:{classes}", "groovy.ui.GroovyMain", str(HARNESS / "Harness.groovy"), str(path)],
@@ -101,9 +102,10 @@ def test_runtime_guard_blocks_writes_on_groovy_and_java_objects(java_stubs, tmp_
         assert "OUTCOME=completed" in proc.stdout and "getResource" in calls and "getPage" in calls
 
 
-def _run_content(classes, tmp_path, script_id, values):
+def _run_content(classes, tmp_path, script_id, values, extra=None):
     script = SCRIPTS[script_id]
     [(_, _, config)] = expand_runs(script, values)
+    config.update(extra or {})
     path = tmp_path / "script.groovy"
     path.write_text(readonly.prepare(build_script(script.template(), config)))
     proc = subprocess.run(["java", "-cp", f"{JARS}:{classes}", "groovy.ui.GroovyMain",
@@ -197,6 +199,7 @@ def _discover(classes, tmp_path, config):
 def test_discovery_finds_site_pages_and_dam_folders(classes, tmp_path):
     sites = _discover(classes, tmp_path, {"root": "/content", "kind": "page", "excludes": [], "levels": 1})
     assert sites["children"] == ["/content/other", "/content/site"]  # /content/dam is a folder, not a page
+    assert sites["direct"] == []  # a folder root has no content of its own
 
     sites = _discover(classes, tmp_path, {"root": "/content", "kind": "page", "excludes": ["/content/other"], "levels": 1})
     assert sites["children"] == ["/content/site"] and sites["skipped"] == ["/content/other"]
@@ -204,26 +207,71 @@ def test_discovery_finds_site_pages_and_dam_folders(classes, tmp_path):
     folders = _discover(classes, tmp_path, {"root": "/content/dam/b", "kind": "folder",
                                             "excludes": ["/content/dam/b/old"], "levels": 1})
     assert folders["children"] == ["/content/dam/b/a", "/content/dam/b/img"]  # jcr:content ignored
-    assert folders["skipped"] == ["/content/dam/b/old"] and folders["looseItems"] == 1  # loose.pdf
+    assert folders["skipped"] == ["/content/dam/b/old"]
+    # loose.pdf sits directly in the entered folder: a direct part, run with its subfolders excluded
+    assert folders["direct"] == [{"path": "/content/dam/b", "exclude": ["/content/dam/b/a", "/content/dam/b/img"]}]
 
     assert "Path not found" in _discover(classes, tmp_path, {"root": "/content/nope", "kind": "folder",
                                                              "excludes": [], "levels": 1})["error"]
 
 
-def test_discovery_levels_two_reports_what_no_root_covers(classes, tmp_path):
-    # Pages: /content -> sites (level 1) -> their child pages (level 2). The site home pages are left uncovered.
+def test_discovery_levels_two_covers_everything_above_the_split(classes, tmp_path):
+    # Pages: the site home page gets a direct (own row) part; a site with no child pages is run whole.
     pages = _discover(classes, tmp_path, {"root": "/content", "kind": "page", "excludes": [], "levels": 2})
-    assert pages["children"] == ["/content/site/en"]
-    assert pages["looseItems"] == 2 and set(pages["loosePaths"]) == {"/content/site", "/content/other"}
-    # DAM: assets inside level-1 folders (a/one.pdf) and in the entered path (loose.pdf) aren't in any level-2 folder.
+    assert pages["children"] == ["/content/other", "/content/site/en"]
+    assert pages["direct"] == [{"path": "/content/site", "exclude": ["/content/site/en"]}]
+    # DAM: folders holding assets above level 2 get a direct part; a level-1 folder without subfolders runs whole.
     dam = _discover(classes, tmp_path, {"root": "/content/dam/b", "kind": "folder", "excludes": [], "levels": 2})
-    assert dam["children"] == ["/content/dam/b/a/sub"]
-    assert set(dam["loosePaths"]) == {"/content/dam/b/a/one.pdf", "/content/dam/b/loose.pdf"}
+    assert dam["children"] == ["/content/dam/b/a/sub", "/content/dam/b/img", "/content/dam/b/old"]
+    assert [d["path"] for d in dam["direct"]] == ["/content/dam/b", "/content/dam/b/a"]
+    assert dam["direct"][1]["exclude"] == ["/content/dam/b/a/sub"]
 
 
-def test_discovery_reports_an_entered_page_root_as_uncovered(classes, tmp_path):
-    """Review fix: batching /content/site runs its child pages; the site page itself is in no run."""
+def test_discovery_includes_an_entered_page_root_itself(classes, tmp_path):
+    """Batching /content/site runs its child pages; the site page itself gets its own direct part."""
     site = _discover(classes, tmp_path, {"root": "/content/site", "kind": "page", "excludes": [], "levels": 1})
-    assert site["looseItems"] == 1 and site["loosePaths"] == ["/content/site"]
-    folder = _discover(classes, tmp_path, {"root": "/content", "kind": "page", "excludes": [], "levels": 1})
-    assert "/content" not in folder["loosePaths"]  # a folder root has no content of its own
+    assert site["children"] == ["/content/site/en"]
+    assert site["direct"] == [{"path": "/content/site", "exclude": ["/content/site/en"]}]
+
+
+def _batched_rows(classes, tmp_path, script_id, values, root, kind, levels, path_column):
+    """Discover like the app does, then run the UNCHANGED script once per part with ordinary inputs."""
+    from groovy_runner.runner import _batch_runs, discover_roots
+    script = SCRIPTS[script_id]
+
+    class Harness:  # discovery through the real built-in script on the JVM
+        def run_script(self, text):
+            path = tmp_path / "discover.groovy"
+            path.write_text(readonly.prepare(text))
+            proc = subprocess.run(["java", "-cp", f"{JARS}:{classes}", "groovy.ui.GroovyMain",
+                                   str(HARNESS / "ContentHarness.groovy"), str(path)], capture_output=True, text=True,
+                                  check=True)
+            return type("R", (), {"output": proc.stdout})()
+    d = discover_roots(Harness(), root, kind, [], levels)
+    assert not d.error
+    rows = []
+    for _, _, config in _batch_runs(script, values, [d]):
+        assert "directOnly" not in config  # plain script inputs only
+        part_rows, _, _ = _run_content(classes, tmp_path, script_id, {**values, script.batch.input: [config[script.batch.input]]},
+                                       {k: v for k, v in config.items() if k != script.batch.input})
+        rows += [r[path_column] for r in part_rows]
+    return rows
+
+
+@pytest.mark.parametrize("levels", [1, 2, 3])
+def test_batch_parts_together_cover_exactly_the_unbatched_run_dam(classes, tmp_path, levels):
+    """Whatever the Levels, the parts list every asset under the entered path, each exactly once."""
+    values = {"rootPath": ["/content/dam/b"], "mode": "list"}
+    batched = _batched_rows(classes, tmp_path, "assets-by-type", values, "/content/dam/b", "folder", levels, "Asset Path")
+    whole, _, _ = _run_content(classes, tmp_path, "assets-by-type", values)
+    assert sorted(batched) == sorted(r["Asset Path"] for r in whole) and len(set(batched)) == len(batched)
+    assert "/content/dam/b/loose.pdf" in batched and "/content/dam/b/a/one.pdf" in batched
+
+
+@pytest.mark.parametrize("levels", [1, 2, 3])
+@pytest.mark.parametrize("root", ["/content", "/content/site"])
+def test_batch_parts_together_cover_exactly_the_unbatched_run_pages(classes, tmp_path, levels, root):
+    values = {"rootPath": [root]}
+    batched = _batched_rows(classes, tmp_path, "page-report", values, root, "page", levels, "Path")
+    whole, _, _ = _run_content(classes, tmp_path, "page-report", values)
+    assert sorted(batched) == sorted(r["Path"] for r in whole) and len(set(batched)) == len(batched)

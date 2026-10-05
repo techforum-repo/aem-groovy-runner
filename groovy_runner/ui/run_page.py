@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -9,9 +10,9 @@ import streamlit as st
 from .. import auth, database, formatter_links, formatters, jobs, readonly, runner, settings_store
 from ..groovy_script import build_script
 from ..logging_setup import get_logger
-from ..scripts_registry import (InputDef, ScriptDef, discover, expand_runs, validate, validate_skips,
+from ..scripts_registry import (InputDef, ScriptDef, batch_conflicts, discover, expand_runs, validate, validate_skips,
                                 with_skips)
-from ..utils import split_lines, split_paths
+from ..utils import slug_for_path, split_lines, split_paths
 from .shared import (audit_event, download_button, get_client, is_auth_rejection, is_mock, multi_download_button,
                      render_friendly_error, sign_out_rejected)
 
@@ -203,10 +204,10 @@ def _render_skip_controls(script: ScriptDef) -> None:
 
 def _batch_settings(script: ScriptDef, values: dict[str, Any]) -> dict[str, Any] | None:
     """The batch options, or None when batching is off. Discovery skips = the
-    script's excluded paths for this run (user's + system areas)."""
+    script's excluded paths for this run (user's + system areas, if on)."""
     if script.batch is None or not st.session_state.get(f"batch_on:{script.id}"):
         return None
-    excluded = values.get(script.system_excludes.input, []) if script.system_excludes else []
+    excluded = values.get(script.batch.exclude_input, [])
     return {"excludes": list(excluded), "levels": int(st.session_state.get(f"batch_levels:{script.id}", 1) or 1)}
 
 
@@ -219,17 +220,19 @@ def _render_batch_controls(script: ScriptDef) -> None:
                      key=f"batch_on:{script.id}",
                      help="For whole-repository runs (e.g. /content or /content/dam): the roots are discovered first "
                           "with one small read-only request, then the script runs once per root: small requests, live "
-                          "progress, cancel and retry per root. You still get ONE file per entered path: the roots' "
-                          "results are combined automatically (rebuilt after a Retry). Excluded paths and skipped "
+                          "progress, cancel and retry per part. Everything under the entered path is included, and "
+                          "you still get ONE file per entered path: the parts are combined automatically (rebuilt "
+                          "after a Retry). Excluded paths and skipped "
                           "system areas are skipped during discovery too.")
     if on:
         st.number_input("Levels below the entered path", min_value=1, max_value=3, value=1, step=1,
                         key=f"batch_levels:{script.id}",
-                        help="Where the work is split into separate runs. 1 = each direct child (e.g. each site under "
-                             "/content, each top-level DAM folder). 2 = one run per child of those, for when one "
-                             "top-level folder is itself too big. At 2+, anything sitting directly in the level-1 "
-                             "folders (e.g. a site's home page, or assets next to the subfolders) isn't in any "
-                             "run; the note after the run lists it.")
+                        help="Only how the work is split into smaller requests; everything under the entered "
+                             "path is always included, and you still get one file per entered path. 1 = one request "
+                             "per direct child (each site under /content, each top-level DAM folder). 2 = one per "
+                             "child of those, for when one top-level folder is itself too big. Assets sitting "
+                             "directly in a folder above that level (or that page's own row) get a small request "
+                             "of their own.")
 
 
 def _job_active() -> bool:
@@ -243,6 +246,11 @@ def _request_cancel() -> None:
         job.cancel.set()
         audit_event("run.batch_cancel_requested", target=job.script_id,
                     details={"finished": job.finished, "total": job.total, "in_flight": job.current})
+
+
+def _script_kind(script_id: str) -> str:
+    script = next((s for s in discover() if s.id == script_id), None)
+    return script.batch.kind if script and script.batch else ""
 
 
 def _finalize(job: jobs.RunJob) -> None:
@@ -259,32 +267,30 @@ def _finalize(job: jobs.RunJob) -> None:
     for d in job.discoveries:
         if d.error:
             continue
-        note = f"Discovered {len(d.children)} root(s) under `{d.root}`"
-        if d.skipped:
-            note += f"; skipped {len(d.skipped)}: " + ", ".join(f"`{p}`" for p in d.skipped[:8]) + ("…" if len(d.skipped) > 8 else "")
-        if d.loose_items:
-            examples = ", ".join(f"`{p}`" for p in d.loose_paths[:5]) + ("…" if d.loose_items > 5 else "")
-            note += (f". ⚠️ {d.loose_items} item(s) are outside every discovered root (they sit in `{d.root}` or a "
-                     f"folder/page above the root level), so the batch doesn't cover them: {examples}. Lower "
-                     "“Levels”, or run those paths without batching, to include them.")
-        messages.append(("info", note))
+        skipped = (f"; skipped {len(d.skipped)}: " + ", ".join(f"`{p}`" for p in d.skipped[:8])
+                   + ("…" if len(d.skipped) > 8 else "")) if d.skipped else ""
+        if not d.labels:
+            kind = "pages" if job.batch and _script_kind(job.script_id) == "page" else "folders or assets"
+            messages.append(("warning", f"Nothing to run under `{d.root}`: no {kind} found there{skipped}. Check the "
+                                        "path, or run it without Batch."))
+            continue
+        messages.append(("info", f"`{d.root}` was split into {len(d.labels)} part(s) for processing{skipped}"))
     st.session_state["session_files"].extend(job.results)
     outputs = st.session_state.setdefault("combined_outputs", {})
+    origin = next((f.origin for f in job.results if f.origin), "")
     if job.batch is not None:
-        # This batch is now the current result for each entered path it discovered: drop any earlier combined
-        # file for those paths first, so a run that produced none can't leave a stale file looking current.
-        for d in job.discoveries:
-            outputs.pop((job.script_id, d.root), None)
         if job.formatter_id is None and any(not d.error for d in job.discoveries):
             messages.append(("info", "Formatter “None (JSON only)” was chosen, so no combined Excel file was made; "
-                                     "the per-root JSON results are below."))
-    for root, path in job.combined:  # keyed by entered path: a rebuilt file (after Retry) replaces the earlier one
-        outputs[(job.script_id, root)] = path
+                                     "use Format below to make one file per entered path."))
+    for root, path in job.combined:  # per entered path AND batch: a Retry's rebuilt file replaces its own batch's
+        outputs[(job.script_id, root, origin)] = path
     batch_id = job.results[0].batch_id if job.results else ""
     st.session_state["last_run"] = {"script_id": job.script_id, "values": job.values, "formatter_id": job.formatter_id,
                                     "batch": job.batch, "batch_id": batch_id,
                                     "lineage": [*job.lineage, batch_id] if job.batch else []}
-    st.session_state["format_selection"] = [f.run_id for f in job.results if f.ok]
+    st.session_state["format_selection"] = list(dict.fromkeys(
+        key for f in job.results if f.ok
+        for key in ([f"g{f.origin}:{f.script_id}:{g}" for g in f.groups] or [f"r{f.run_id}"])))
     st.session_state["_run_messages"] = messages
     if not is_mock() and any(f.exception is not None and is_auth_rejection(f.exception) for f in job.results):
         sign_out_rejected("AEM rejected your token during the run (expired or invalid). Please sign in again.")
@@ -327,8 +333,81 @@ def _render_job_panel() -> None:
 
 # --- session files + formatting ----------------------------------------------
 
-def _file_label(f: runner.GeneratedFile) -> str:
-    return f"{f.script_name} · {f.label} · {f.batch_id}"
+@dataclass
+class _Entry:
+    """One line of the results: a plain run, or ONE entered path of a batch
+    (its parts are internal: they're combined into that path's file)."""
+    key: str
+    script_id: str
+    script_name: str
+    label: str
+    run: str
+    parts: list[runner.GeneratedFile]
+    group: str = ""  # the entered path, for a batch
+
+    @property
+    def ok_parts(self) -> list[runner.GeneratedFile]:
+        return [f for f in self.parts if f.ok]
+
+    @property
+    def live_parts(self) -> list[runner.GeneratedFile]:
+        """Without a failed discovery that a later Retry already redid."""
+        redone = any(not f.label.endswith("(discovery)") for f in self.parts)
+        return [f for f in self.parts if not (redone and f.label.endswith("(discovery)"))]
+
+    def outputs(self) -> list[str]:
+        if self.group:
+            path = st.session_state.get("combined_outputs", {}).get((self.script_id, self.group, self.run))
+            return [path] if path and Path(path).exists() else []
+        return [p for p in self.parts[0].outputs.values() if Path(p).exists()]
+
+
+def _entries(files: list[runner.GeneratedFile]) -> list[_Entry]:
+    entries: list[_Entry] = []
+    groups = runner.batch_groups(files)
+    seen: set[tuple[str, str, str]] = set()
+    for f in files:
+        if not f.groups:
+            entries.append(_Entry(f"r{f.run_id}", f.script_id, f.script_name, f.label, f.batch_id, [f]))
+        for group in f.groups:
+            if (key := (f.script_id, group, f.origin)) not in seen:
+                seen.add(key)
+                entries.append(_Entry(f"g{f.origin}:{f.script_id}:{group}", f.script_id, f.script_name, group,
+                                      f.origin, groups[key], group=group))
+    return entries
+
+
+def _status(entry: _Entry) -> str:
+    parts = entry.live_parts
+    ok = len([f for f in parts if f.ok])
+    if ok == len(parts):
+        return "✅"
+    if any(f.status == "cancelled" for f in parts) and ok + len([f for f in parts if f.status == "cancelled"]) == len(parts):
+        return f"⏹ Cancelled ({ok}/{len(parts)} parts done)" if entry.group else "⏹ Cancelled"
+    return f"⚠️ {ok}/{len(parts)} parts" if entry.group and ok else "❌"
+
+
+def _entry_label(e: _Entry) -> str:
+    return f"{e.script_name} · {e.label}" + (" (batch)" if e.group else "") + f" · {e.run}"
+
+
+def _merge(e: _Entry) -> Any:
+    script = next((s for s in discover() if s.id == e.script_id), None)
+    return script.batch.merge_rows if e.group and script and script.batch else None
+
+
+def _format_entry(e: _Entry, formatter_id: str) -> str:
+    if not e.group:
+        return runner.format_file(e.parts[0], formatter_id)
+    path = runner.format_combined(e.ok_parts, formatter_id, st.session_state["session_id"], min_files=1,
+                                  name=slug_for_path(e.group), merge=_merge(e))
+    st.session_state.setdefault("combined_outputs", {})[(e.script_id, e.group, e.run)] = path
+    return path
+
+
+def _entry_data(e: _Entry) -> Any:
+    """Exactly the rows Format would write (same checks); raises ValueError."""
+    return e.parts[0].load() if not e.group else runner.load_rows(e.ok_parts, _merge(e))
 
 
 def _load_links() -> dict[str, tuple[list[str], str]]:
@@ -360,67 +439,82 @@ def _render_session_files(scripts: dict[str, ScriptDef], links: dict[str, tuple[
                  lineage=last.get("lineage"))
         st.rerun()
 
+    entries = _entries(files)
     st.dataframe(pd.DataFrame([{
-        "Script": f.script_name, "Input": f.label, "Run": f.batch_id, "Status": "✅" if f.ok else "⏹ Cancelled" if f.status == "cancelled" else "❌",
-        "Rows": f.row_count, "AEM run time": f.running_time,
-        "Details": ", ".join(f"{k}={v}" for k, v in f.meta.items() if not isinstance(v, (list, dict))),
-        "Formatter used": ", ".join(_formatter_name(fid) for fid in f.outputs) or "— (JSON only)",
-        "Run ID": f.run_id, "AEM user": f.aem_user,
-    } for f in reversed(files)]), width="stretch", hide_index=True)
+        "Script": e.script_name, "Input": e.label + (f" (batch, {len(e.live_parts)} parts)" if e.group else ""),
+        "Run": e.run, "Status": _status(e),
+        "Rows": sum(f.row_count or 0 for f in e.ok_parts) if e.ok_parts else None,
+        "AEM run time": e.parts[0].running_time if not e.group else "",
+        "Details": ", ".join(f"{k}={v}" for k, v in e.parts[0].meta.items() if not isinstance(v, (list, dict)))
+                   if not e.group else "",
+        "Output": ", ".join(Path(p).name for p in e.outputs()) or "— (JSON only)",
+        "AEM user": e.parts[0].aem_user,
+    } for e in reversed(entries)]), width="stretch", hide_index=True)
+    batch_parts = [(e.group, f) for e in entries if e.group for f in e.parts]
+    if batch_parts:
+        with st.expander(f"Batch parts ({len(batch_parts)}): how the batched paths were split into requests"):
+            st.caption("Internal to batching: each entered path's parts are combined into that path's one file. "
+                       "“(direct items)” = assets sitting directly in that folder, or that page's own row.")
+            st.dataframe(pd.DataFrame([{
+                "Entered path": group, "Part": f.label, "Status": "✅" if f.ok else "⏹" if f.status == "cancelled" else "❌",
+                "Rows": f.row_count, "AEM run time": f.running_time, "Run ID": f.run_id,
+            } for group, f in batch_parts]), width="stretch", hide_index=True)
 
-    combined_files = [p for p in st.session_state.get("combined_outputs", {}).values() if Path(p).exists()]
-    if combined_files:
-        st.markdown("##### Combined files (one per entered path)")
-        for p in reversed(combined_files):
-            download_button(f"⬇️ {Path(p).name}", lambda p=p: Path(p).read_bytes(), Path(p).name, XLSX_MIME,
-                            source_paths=[p], key=f"dl_combined:{p}")
-
-    ok = [f for f in files if f.ok]
-    if not ok:
+    usable = [e for e in entries if e.ok_parts]
+    if not usable:
         return
-    by_id = {f.run_id: f for f in ok}
-    st.session_state["format_selection"] = [i for i in st.session_state.get("format_selection", []) if i in by_id]
-    st.markdown("#### Format")
-    selected_ids = st.multiselect("Files (this session only)", list(by_id), key="format_selection",
-                                  format_func=lambda i: _file_label(by_id[i]))
-    selected = [by_id[i] for i in selected_ids]
+    by_key = {e.key: e for e in usable}
+    st.session_state["format_selection"] = [k for k in st.session_state.get("format_selection", []) if k in by_key]
+    st.markdown("#### Format and download")
+    selected_keys = st.multiselect("Results (this session only)", list(by_key), key="format_selection",
+                                   format_func=lambda k: _entry_label(by_key[k]))
+    selected = [by_key[k] for k in selected_keys]
 
-    declared = [fid for f in selected for fid in formatter_links.link_for(f.script_id, links).formatters]
+    declared = [fid for e in selected for fid in formatter_links.link_for(e.script_id, links).formatters]
     options = list(dict.fromkeys(declared + list(formatters.FORMATTERS)))
     formatter_id = st.selectbox("Formatter", options, format_func=lambda i: f"{formatters.get(i).name} — {formatters.get(i).description}"
                                 + ("" if i in declared else " (not linked to this script)"))
     formatter = formatters.get(formatter_id)
     combine = st.checkbox("Combine selected into one file", key="format_combine", disabled=len(selected) < 2,
-                          help="One file with the rows of all selected results, e.g. every site of a batched report. "
-                               "Individual files are not created by this.")
+                          help="One file with the rows of all selected results. Individual files are not created by this.")
     if combine and len(selected) >= 2:
         if st.button(f"Combine {len(selected)} results into one {formatter.name} file", type="primary"):
             try:
-                path = runner.format_combined(selected, formatter_id, st.session_state["session_id"])
+                path = runner.format_combined([f for e in selected for f in e.ok_parts], formatter_id,
+                                              st.session_state["session_id"])
                 st.session_state.setdefault("combined_outputs", {})[("manual", path)] = path
                 st.session_state["_format_messages"] = [("success", f"Combined {len(selected)} results into {Path(path).name}.")]
             except Exception as exc:
                 st.session_state["_format_messages"] = [("warning", f"Not combined: {exc}")]
             st.rerun()
-    elif st.button(f"Format {len(selected)} file(s) with {formatter.name}", type="primary", disabled=not selected):
+    elif st.button(f"Format {len(selected)} result(s) with {formatter.name}", type="primary", disabled=not selected):
         messages, done = [], 0
-        for f in selected:
+        for e in selected:
             try:
-                runner.format_file(f, formatter_id)
+                _format_entry(e, formatter_id)
                 done += 1
+                if e.group and len(e.ok_parts) < len(e.live_parts):
+                    messages.append(("warning", f"`{e.label}`: {len(e.live_parts) - len(e.ok_parts)} batch part(s) "
+                                                "failed or were cancelled and aren't in the file. Retry them first."))
             except Exception as exc:
-                messages.append(("warning", f"`{f.label}`: {exc}"))
+                messages.append(("warning", f"`{e.label}`: {exc}"))
         if done:
-            messages.append(("success", f"Formatted {done} file(s) with {formatter.name}."))
-        # Rerun so the session table above reflects the new outputs.
+            messages.append(("success", f"Formatted {done} result(s) with {formatter.name}."))
         st.session_state["_format_messages"] = messages
         st.rerun()
     for kind, text in st.session_state.pop("_format_messages", []):
         (st.success if kind == "success" else st.warning)(text)
 
+    manual = [p for k, p in st.session_state.get("combined_outputs", {}).items() if k[0] == "manual" and Path(p).exists()]
+    if manual:
+        st.markdown("##### Combined across results")
+        for p in reversed(manual):
+            download_button(f"⬇️ {Path(p).name}", lambda p=p: Path(p).read_bytes(), Path(p).name, XLSX_MIME,
+                            source_paths=[p], key=f"dl_combined:{p}")
+
     if selected:
-        paths = [p for f in selected for p in [f.json_path, f.executed_script_path, *f.outputs.values()] if p]
-        excel = [p for f in selected for p in f.outputs.values() if Path(p).exists()]
+        excel = [p for e in selected for p in e.outputs()]
+        paths = [p for e in selected for f in e.parts for p in [f.json_path, f.executed_script_path] if p] + excel
         if excel:
             multi_download_button(excel, f"⬇️ Download all {len(excel)} Excel file(s) (individually, one click)", XLSX_MIME)
         else:
@@ -432,15 +526,18 @@ def _render_session_files(scripts: dict[str, ScriptDef], links: dict[str, tuple[
                             f"groovy-runner-{st.session_state['session_id']}.zip", "application/zip",
                             source_paths=paths, width="stretch")
         with c2:
-            singles = [p for f in selected for p in f.outputs.values() if Path(p).exists()]
-            if singles:
-                one = st.selectbox("Single file", singles, format_func=lambda p: Path(p).name, label_visibility="collapsed")
+            if excel:
+                one = st.selectbox("Single file", excel, format_func=lambda p: Path(p).name, label_visibility="collapsed")
                 download_button(f"⬇️ {Path(one).name}", lambda one=one: Path(one).read_bytes(), Path(one).name, XLSX_MIME,
                                 source_paths=[one], width="stretch")
 
         st.markdown("#### Preview")
-        target = st.selectbox("Preview file", selected, format_func=_file_label) if len(selected) > 1 else selected[0]
-        data = target.load()
+        target = st.selectbox("Preview", selected, format_func=_entry_label) if len(selected) > 1 else selected[0]
+        try:
+            data = _entry_data(target)
+        except ValueError as exc:
+            st.warning(f"No preview: {exc}")
+            return
         fits = formatter.check(data) is None
         sample = data[:PREVIEW_ROWS] if isinstance(data, list) else data
         df = (formatter if fits else formatters.get("generic-excel")).to_dataframe(sample)
@@ -485,6 +582,8 @@ def render() -> None:
 
     skips = _skips(script)
     errors = validate(script, _values(script)) + validate_skips(script, skips)
+    if _batch_settings(script, _values(script)) is not None:
+        errors += batch_conflicts(script, _values(script))
     values = with_skips(script, _values(script), skips)  # what is sent and audited
     if not is_mock() and not (settings_store.get("aem_author_url") and auth.is_signed_in(st.session_state.get("user_token"))):
         errors.append("Not connected to AEM: set the author URL (Settings) and sign in with your account (sidebar)")

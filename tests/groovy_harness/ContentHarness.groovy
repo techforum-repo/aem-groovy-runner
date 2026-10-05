@@ -56,9 +56,11 @@ assets.each { it.type = "dam:Asset" }
 def damB = new Res(path: "/content/dam/b", children: [
         a  : new Res(path: "/content/dam/b/a", children: [
                 sub: new Res(path: "/content/dam/b/a/sub"),
-                "one.pdf": assets.find { it.path == "/content/dam/b/a/one.pdf" }]),
-        img: new Res(path: "/content/dam/b/img"),
-        old: new Res(path: "/content/dam/b/old"), "loose.pdf": assets.find { it.path.endsWith("loose.pdf") },
+                "one.pdf": assets.find { it.path == "/content/dam/b/a/one.pdf" },
+                "two.pdf": assets.find { it.path == "/content/dam/b/a/two.pdf" }]),
+        img: new Res(path: "/content/dam/b/img", children: assets.findAll { it.path.startsWith("/content/dam/b/img/") }
+                .collectEntries { [(it.name): it] }),
+        old: new Res(path: "/content/dam/b/old", children: ["x.pdf": assets.find { it.path == "/content/dam/b/old/x.pdf" }]), "loose.pdf": assets.find { it.path.endsWith("loose.pdf") },
         "jcr:content": new Res(path: "/content/dam/b/jcr:content", type: "nt:unstructured")])
 def resources = ["/content/site": contentFolder.children.site, "/content": contentFolder, "/content/dam/b": damB, "/content/dam/it's": new Res(path: "/content/dam/it's")]
 
@@ -77,6 +79,8 @@ def findResources = { String sql, String lang ->
     }.iterator()
 }
 def pm = [getPage: { String p -> pages[p] }] as PageManager
-def resolver = [getResource: { String p -> resources[p] ?: pages[p]?.content }, findResources: findResources,
+// Anything below /content/dam/b resolves by walking its children (batch parts run on subfolders).
+def damChild = { String p -> p.startsWith("/content/dam/b/") ? damB.getChild(p.substring("/content/dam/b/".length())) : null }
+def resolver = [getResource: { String p -> resources[p] ?: damChild(p) ?: pages[p]?.content }, findResources: findResources,
                 adaptTo: { Class c -> c == PageManager ? pm : null }]
 new GroovyShell(new Binding(resourceResolver: resolver)).evaluate(new File(args[0]).text)

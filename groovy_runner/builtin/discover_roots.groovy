@@ -26,48 +26,46 @@ if (!start) {
     return
 }
 
-def folderTypes = ["sling:Folder", "sling:OrderedFolder", "nt:folder"]
 def isExcluded = { String path -> excludes.any { ex -> path == ex || path.startsWith(ex + "/") } }
+// Folder kind: any child that isn't an asset may hold assets (folder node types vary), so it's a part.
+def isSystemName = { String name -> name.startsWith("jcr:") || name.startsWith("rep:") || name.startsWith("cq:") }
 def matches = { Resource r ->
-    kind == "page" ? r.adaptTo(Page) != null : folderTypes.contains(r.resourceType)
+    kind == "page" ? r.adaptTo(Page) != null : (r.resourceType != "dam:Asset" && !isSystemName(r.name))
 }
 
-def found = []
+def found = []    // parts run with their whole subtree
+def direct = []   // [path, exclude]: parts run for their OWN direct content only
 def skipped = []
-// Content no discovered root covers: assets sitting in the entered path or in
-// any folder above the root level, and (pages) the intermediate pages
-// themselves when levels > 1, e.g. each site's home page.
-def looseItems = 0
-def loosePaths = []
-def noteLoose = { String path ->
-    looseItems++
-    if (loosePaths.size() < 20) loosePaths << path
-}
+// The app never asks a script for "direct content only": it runs the script on
+// the path with the listed children added to the script's own excluded paths.
+// That way batching never loses what sits above the split level: assets
+// directly in the entered/intermediate folders, or those pages' own rows. An
+// intermediate folder/page with nothing further to split is simply run whole.
+// Returns false for a folder/page below the entered path that has nothing to
+// split further: the caller then runs it whole as one part.
 def walk
 walk = { Resource parent, int depth ->
+    def kids = []
+    def hasDirectAsset = false
+    def skippedHere = []
     parent.listChildren().each { Resource child ->
-        def name = child.name
-        if (name.startsWith("jcr:") || name.startsWith("rep:") || name.startsWith("cq:")) return
+        if (isSystemName(child.name)) return
         if (isExcluded(child.path)) {
-            skipped << child.path
+            skippedHere << child.path
             return
         }
-        if (!matches(child)) {
-            if (child.resourceType == "dam:Asset") noteLoose(child.path)
-            return
-        }
-        if (depth < levels) {
-            if (kind == "page") noteLoose(child.path)  // its own row isn't in any deeper root's report
-            walk(child, depth + 1)
-        } else {
-            found << child.path
-        }
+        if (matches(child)) kids << child
+        else if (child.resourceType == "dam:Asset") hasDirectAsset = true
     }
+    if (depth > 1 && kids.isEmpty()) return false
+    skipped.addAll(skippedHere)
+    def ownContent = kind == "page" ? parent.adaptTo(Page) != null : hasDirectAsset
+    if (ownContent) direct << [path: parent.path, exclude: kids*.path.sort()]
+    kids.each { Resource child ->
+        if (!(depth < levels && walk(child, depth + 1))) found << child.path
+    }
+    return true
 }
-// A page entered as the root (e.g. /content/acme) is itself content that no
-// child run includes: report it, like the intermediate pages above.
-if (kind == "page" && start.adaptTo(Page) != null) noteLoose(root)
 walk(start, 1)
 
-emit([root: root, kind: kind, levels: levels, children: found.sort(), skipped: skipped.sort(), looseItems: looseItems,
-      loosePaths: loosePaths])
+emit([root: root, kind: kind, levels: levels, children: found.sort(), direct: direct.sort { it.path }, skipped: skipped.sort()])

@@ -46,7 +46,11 @@
   "batch": {
     "input": "rootPath",
     "kind": "page",
-    "label": "Batch: run each site under the entered path as its own run (e.g. /content \u2192 every site)"
+    "label": "Batch: process large paths (e.g. /content) in smaller requests, still one file per entered path",
+    "includeRootInput": "includeRoot",
+    "notWith": [
+      "maxDepth"
+    ]
   },
   "systemExcludes": {
     "input": "excludedPaths",
