@@ -11,6 +11,12 @@
     ],
     "default": "generic-excel"
   },
+  "audit-events": {
+    "formatters": [
+      "generic-excel"
+    ],
+    "default": "generic-excel"
+  },
   "page-report": {
     "formatters": [
       "generic-excel"

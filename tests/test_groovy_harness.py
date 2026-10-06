@@ -297,3 +297,76 @@ def test_page_sample_skeleton_is_batch_ready_and_batching_changes_nothing(classe
     batched = _batched_rows(classes, tmp_path, "page-sample", values, root, "page", levels, "Path")
     whole, _, _ = _run_content(classes, tmp_path, "page-sample", values)
     assert whole and sorted(batched) == sorted(r["Path"] for r in whole) and len(set(batched)) == len(batched)
+
+
+def _run_audit(classes, tmp_path, values, *harness_args):
+    script = SCRIPTS["audit-events"]
+    [(_, _, config)] = expand_runs(script, values)
+    path = tmp_path / "audit.groovy"
+    path.write_text(readonly.prepare(build_script(script.template(), config)))  # exactly what is sent
+    proc = subprocess.run(["java", "-cp", f"{JARS}:{classes}", "groovy.ui.GroovyMain",
+                           str(HARNESS / "AuditHarness.groovy"), str(path), *harness_args],
+                          capture_output=True, text=True, check=True)
+    rows, meta = split_payload(parse_output(proc.stdout))
+    return rows, meta, [line[4:] for line in proc.stdout.splitlines() if line.startswith("SQL=")]
+
+
+SITE = "/content/acme/en-us/products"
+DAM = "/content/dam/acme/brochures"
+ONLY_ITSELF, BELOW = SCRIPTS["audit-events"].inputs[1].options[1:]  # manifest "scope" options
+
+
+def test_audit_page_events_with_defaults(classes, tmp_path):
+    rows, meta, [sql] = _run_audit(classes, tmp_path, {"basePath": [SITE]})
+    assert "FROM [cq:AuditEvent]" in sql and "ISDESCENDANTNODE([/var/audit])" in sql and "CAST(" not in sql
+    assert f"([cq:path] = '{SITE}' OR [cq:path] LIKE '{SITE}/%')" in sql  # the entered path itself by default
+    got = [(r["Log"], r["Path"].replace(SITE, "") or "/", r["Event Type"], r["User"]) for r in rows]
+    # Default types only (no VersionCreated); not products_old (LIKE's "_" wildcard); a deleted page is included.
+    assert got == [("Page", "/", "PageModified", "root.user"), ("Page", "/archive/old", "PageDeleted", "amy"),
+                   ("Page", "/stents", "PageModified", "jane"), ("Replication", "/stents/stent-a", "Activate", "john"),
+                   ("Page", "/stents/stent-a", "PageModified", "jane")]  # newest first
+    assert rows[0]["Event Time"] == "2026-09-06 08:00:00"
+    assert (meta["pageEvents"], meta["replicationEvents"], meta["assetEvents"]) == (4, 1, 0)
+
+
+def test_audit_asset_events_users_and_old_user_property(classes, tmp_path):
+    rows, meta, _ = _run_audit(classes, tmp_path, {"basePath": [DAM]})
+    got = [(r["Log"], r["Path"].rsplit("/", 1)[-1], r["Event Type"], r["User"]) for r in rows]
+    # Asset log + asset publishing; viewing and rendition noise filtered out; cq:userId read as a fallback.
+    assert got == [("Asset", "b.pdf", "ASSET_CREATED", "legacy.user"), ("Replication", "a.pdf", "Activate", "john"),
+                   ("Asset", "a.pdf", "METADATA_UPDATED", "jane")]
+    rows, _, _ = _run_audit(classes, tmp_path, {"basePath": [f"{DAM}/a.pdf"], "eventTypes": [], "users": ["JANE"]})
+    assert [r["Event Type"] for r in rows] == ["METADATA_UPDATED"]  # a single asset; user match is case-insensitive
+    rows, _, _ = _run_audit(classes, tmp_path, {"basePath": [DAM], "replicationEvents": False, "assetEvents": True})
+    assert {r["Log"] for r in rows} == {"Asset"}
+
+
+def test_audit_levels_root_excludes_types_and_since(classes, tmp_path):
+    rows, _, _ = _run_audit(classes, tmp_path, {"basePath": [SITE], "levels": 2})
+    assert {r["Path"] for r in rows} == {f"{SITE}/stents/stent-a", f"{SITE}/archive/old"}
+    rows, _, _ = _run_audit(classes, tmp_path, {"basePath": [SITE], "scope": BELOW, "eventTypes": [],
+                                                "excludedPaths": [f"{SITE}/archive"]})
+    paths = [r["Path"] for r in rows]
+    assert SITE not in paths and f"{SITE}/archive/old" not in paths
+    assert "VersionCreated" in [r["Event Type"] for r in rows] and len(rows) == 4  # every type now
+    _, _, [sql] = _run_audit(classes, tmp_path, {"basePath": [SITE], "sinceDays": 30, "scope": BELOW})
+    assert "[cq:time] >= CAST('" in sql and f"[cq:path] LIKE '{SITE}/%'" in sql and "[cq:path] = " not in sql
+
+
+def test_audit_query_failure_explains_what_to_do(classes, tmp_path):
+    rows, meta, _ = _run_audit(classes, tmp_path, {"basePath": [SITE]}, "fail")
+    assert rows == [] and "more than 100000 nodes" in meta["error"] and "last N days" in meta["error"]
+
+
+def test_audit_path_quotes_are_escaped(classes, tmp_path):
+    _, _, [sql] = _run_audit(classes, tmp_path, {"basePath": ["/content/it's"]})
+    assert "LIKE '/content/it''s/%'" in sql
+
+
+def test_audit_single_page_or_asset_only(classes, tmp_path):
+    """Scope "only this path itself": one page's own history, not its child pages; same for one asset."""
+    rows, _, [sql] = _run_audit(classes, tmp_path, {"basePath": [f"{SITE}/stents"], "scope": ONLY_ITSELF})
+    assert f"[cq:path] = '{SITE}/stents'" in sql and "LIKE" not in sql  # exact-path query
+    assert [(r["Path"], r["Event Type"]) for r in rows] == [(f"{SITE}/stents", "PageModified")]  # not stent-a
+    rows, _, _ = _run_audit(classes, tmp_path, {"basePath": [f"{DAM}/a.pdf"], "scope": ONLY_ITSELF})
+    assert [r["Event Type"] for r in rows] == ["Activate", "METADATA_UPDATED"]

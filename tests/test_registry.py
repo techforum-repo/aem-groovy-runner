@@ -138,3 +138,10 @@ def test_scripts_page_shows_the_sample_skeleton():
             assert (root / "examples" / sample / name).read_text().strip() in shown
     text = " ".join([m.value for m in at.markdown] + [c.value for c in at.caption])
     assert str(root) not in text and "`scripts/`" in text  # no machine paths on screen
+
+
+def test_audit_script_is_valid_read_only_and_not_batched():
+    script = {s.id: s for s in discover()}["audit-events"]
+    assert script.problems == []  # includes the read-only check (no session.workspace / execute)
+    assert script.batch is None  # deleted items' events can't be found by discovery
+    assert not validate(script, {"basePath": ["/content/dam/acme/a.pdf"]})  # asset paths are accepted

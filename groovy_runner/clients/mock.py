@@ -29,6 +29,8 @@ class MockGroovyConsoleClient:
             payload = self._discover(config)
         elif "parentDamPath" in config:
             payload = self._asset_references(config)
+        elif "auditRoot" in config:
+            payload = self._audit(config)
         elif "rootPath" in config and "mode" in config:
             payload = self._assets_by_type(config)
         elif "rootPath" in config:
@@ -142,6 +144,29 @@ class MockGroovyConsoleClient:
                              "pageModifiedBy": rng.choice(_USERS), "pagePublishedBy": rng.choice(_USERS)})
         return {"parentDamPath": root, "assetsScanned": scanned, "skippedExcludedFolder": skipped_folder,
                 "skippedFormat": skipped_format, "rowCount": len(rows), "rows": rows}
+
+    def _audit(self, config: dict) -> dict:
+        """Shaped like scripts/audit-events output."""
+        base = config["basePath"]
+        rng = random.Random(f"{self._seed}:{base}")
+        is_dam = base.startswith("/content/dam")
+        kinds = ([("Asset", "METADATA_UPDATED"), ("Asset", "ASSET_CREATED"), ("Asset", "ASSET_VIEWED"),
+                  ("Replication", "Activate")] if is_dam else
+                 [("Page", "PageModified"), ("Page", "PageModified"), ("Page", "PageCreated"),
+                  ("Page", "VersionCreated"), ("Replication", "Activate"), ("Replication", "Deactivate")])
+        wanted = {t.lower() for t in config.get("eventTypes") or []}
+        logs = {"Page": config.get("pageEvents", True), "Asset": config.get("assetEvents", True),
+                "Replication": config.get("replicationEvents", True)}
+        rows = []
+        for i in range(rng.randint(10, 25)):
+            log, kind = rng.choice(kinds)
+            if (wanted and kind.lower() not in wanted) or not logs[log]:
+                continue
+            leaf = f"document-{i % 5}.pdf" if is_dam else f"{rng.choice(['overview', 'specs', 'resources'])}/page-{i % 5}"
+            rows.append({"Log": log, "Path": f"{base}/{leaf}", "Event Type": kind, "User": rng.choice(_USERS),
+                         "Event Time": f"2026-09-{rng.randint(10, 28)} {rng.randint(10, 23)}:00:00"})
+        rows.sort(key=lambda r: r["Event Time"], reverse=True)
+        return {"basePath": base, "eventsRead": len(rows) + 3, "rowCount": len(rows), "rows": rows}
 
     def identity(self) -> str:
         return "mock.user@example.com"

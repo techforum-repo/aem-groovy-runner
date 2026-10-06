@@ -90,6 +90,34 @@ Bundled scripts:
   type filter inside the query and `OPTION(TRAVERSAL FAIL)` so AEM refuses
   rather than crawls if no index fits.
 
+- `audit-events`: the AEM audit log for pages **and** assets under a path:
+  who created, modified, moved, deleted or published what, and when (newest
+  first). It's the team's console page-audit script, converted and extended.
+  - It reads AEM's three audit logs (`cq:AuditEvent` nodes under `/var/audit`):
+    page events (`com.day.cq.wcm.core.page`, e.g. `PageModified`), asset events
+    (`com.day.cq.dam`, e.g. `METADATA_UPDATED`) and publish events
+    (`com.day.cq.replication`: `Activate`/`Deactivate`, for pages and assets).
+    A **Log** column says which.
+  - Event types are matched by exact name; the default keeps changes and
+    publishing and drops noise such as `ASSET_VIEWED` or `RENDITION_UPDATED`.
+    Clear the list to see every type recorded.
+  - The user is read from `cq:userid`, the property name in Adobe's
+    `cq:AuditEvent` definition (the original script read `cq:userId`, so its
+    user column was likely empty); `cq:userId` is still read as a fallback.
+  - Same query shape as the original (`cq:path` under the entered path, checked
+    exactly afterwards, since `_` is a wildcard in `LIKE`), via read-only
+    `findResources`. Options: last N days, users, excluded subtrees, exact level.
+  - **Scope:** the path and everything under it (default), **only the path
+    itself** (one page's or asset's own history, an exact-path query), or only
+    what's under it (as the original did).
+  - **Retention:** audit logs are purged on a schedule. On AEM as a Cloud
+    Service, Adobe's newer default keeps only 7 days (older environments: 7
+    years), so an empty result can mean the events are gone. A query that
+    hits AEM's read limit on a big audit log fails with a message suggesting
+    a days limit.
+  - Batch is off for it: events of deleted pages and assets can't be found by
+    discovery.
+
 **Inputs** are injected as base64 JSON replacing `__CONFIG_B64__`, so paths
 with spaces or quotes can't break the script:
 
