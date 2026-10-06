@@ -49,5 +49,8 @@ def test_registry():
 
 
 def test_slug_and_split_paths():
-    assert slug_for_path("/content/dam/acme/Product Library/datasheets/") == "acme_Product-Library_datasheets"
+    assert slug_for_path("/content/dam/acme/Product Library/datasheets/") == "Product-Library_datasheets"
+    assert slug_for_path("/content/acme/en-us/products") == "en-us_products"  # last two parts only
+    assert slug_for_path("/content/dam/acme") == "acme" and slug_for_path("/content/dam") == "dam"
+    assert slug_for_path("/content") == "content"
     assert split_paths(" /a, b \n\n/c\n/a, b") == ["/a, b", "/c"]
