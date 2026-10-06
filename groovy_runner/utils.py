@@ -52,15 +52,18 @@ def normalize_jcr_path(path: str) -> str:
 
 
 def slug_for_path(dam_path: str) -> str:
-    """Filesystem-safe file stem for a DAM folder, e.g.
-    "/content/dam/acme/Product Library/datasheets/" -> "acme_Product-Library_datasheets"."""
+    """Filesystem-safe file stem from the LAST TWO parts of a path, e.g.
+    "/content/dam/acme/Product Library/datasheets/" -> "Product-Library_datasheets",
+    "/content/acme/en-us/products" -> "en-us_products". Two runs with the same
+    stem don't overwrite each other: the runner adds -2, -3... and the zip
+    keeps both."""
     path = normalize_jcr_path(dam_path)
     for prefix in ("/content/dam/", "/content/"):
         if path.startswith(prefix):
             path = path[len(prefix):]
             break
     segments = [re.sub(r"[^A-Za-z0-9._-]+", "-", seg).strip("-") for seg in path.strip("/").split("/")]
-    return "_".join(s for s in segments if s) or "dam"
+    return "_".join([s for s in segments if s][-2:]) or "dam"
 
 
 def display_path(path: Path) -> str:
