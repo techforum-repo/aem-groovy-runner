@@ -1,0 +1,116 @@
+{
+  "name": "Audit Events",
+  "description": "Who created, modified, moved, deleted or published which page or asset, and when: the AEM audit log (cq:AuditEvent) for everything under a path, newest first. Page, asset (DAM) and replication events. Audit logs are purged on a schedule (on AEM as a Cloud Service possibly after only 7 days), so older activity may be gone. No Batch: deleted items' events can't be found by discovery.",
+  "inputs": [
+    {
+      "key": "basePath",
+      "label": "Paths \u2014 pages, asset folders or single assets, one per line (each produces its own file)",
+      "type": "path_list",
+      "iterate": true,
+      "required": true,
+      "must_start_with": "/content",
+      "placeholder": "/content/acme/en-us/products\n/content/dam/acme/brochures"
+    },
+    {
+      "key": "scope",
+      "label": "Scope",
+      "type": "select",
+      "options": [
+        "This path and everything under it",
+        "Only this path itself (a single page or asset)",
+        "Only what's under this path"
+      ],
+      "default": "This path and everything under it",
+      "help": "\"Only this path itself\" gives one page's or asset's own history (fastest: an exact-path query). \"Only what's under this path\" leaves out the entered page or folder's own events."
+    },
+    {
+      "key": "pageEvents",
+      "label": "Page events (created, modified, moved, deleted...)",
+      "type": "bool",
+      "default": true
+    },
+    {
+      "key": "assetEvents",
+      "label": "Asset events (created, metadata updated, moved, removed...)",
+      "type": "bool",
+      "default": true
+    },
+    {
+      "key": "replicationEvents",
+      "label": "Publish events (activate / deactivate, pages and assets)",
+      "type": "bool",
+      "default": true
+    },
+    {
+      "key": "eventTypes",
+      "label": "Event types to keep (exact names; empty = all)",
+      "type": "string_list",
+      "default": [
+        "PageCreated",
+        "PageModified",
+        "PageMoved",
+        "PageDeleted",
+        "PageRestored",
+        "ASSET_CREATED",
+        "METADATA_UPDATED",
+        "ORIGINAL_UPDATED",
+        "ASSET_MOVED",
+        "ASSET_REMOVED",
+        "RESTORED",
+        "ASSET_PUBLISHED",
+        "Activate",
+        "Deactivate",
+        "Delete"
+      ],
+      "help": "Changes and publishing by default. Other types: pages VersionCreated, PageValid, PageInvalid; assets ASSET_VIEWED, DOWNLOADED, RENDITION_UPDATED, RENDITION_DOWNLOADED, VERSIONED, ASSET_SHARED, ASSET_EXPIRED, ASSET_EXPIRING, SUBASSET_UPDATED, ACCEPTED, REJECTED, ADDED_COMMENT; replication Test, Reverse, Internal Poll. Clear the list to see every type recorded."
+    },
+    {
+      "key": "sinceDays",
+      "label": "Only events from the last N days (0 = all kept)",
+      "type": "number",
+      "default": 0,
+      "help": "Keeps the query and the file small on a large audit log."
+    },
+    {
+      "key": "users",
+      "label": "Only these users (exact user IDs; empty = everyone)",
+      "type": "string_list",
+      "advanced": true,
+      "placeholder": "jane.doe@example.com"
+    },
+    {
+      "key": "excludedPaths",
+      "label": "Excluded subtrees \u2014 one per line",
+      "type": "path_list",
+      "must_start_with": "/content"
+    },
+    {
+      "key": "levels",
+      "label": "Only items exactly N levels below the path (0 = any level)",
+      "type": "number",
+      "default": 0,
+      "advanced": true,
+      "help": "E.g. 2 for /content/acme/en-us/products/<level1>/<level2> only."
+    },
+    {
+      "key": "auditRoot",
+      "label": "Audit root",
+      "type": "path",
+      "default": "/var/audit",
+      "advanced": true
+    }
+  ],
+  "batch": false,
+  "systemExcludes": {
+    "input": "excludedPaths",
+    "paths": [
+      "/content/campaigns",
+      "/content/catalogs",
+      "/content/communities",
+      "/content/forms",
+      "/content/screens",
+      "/content/projects",
+      "/content/usergenerated"
+    ]
+  }
+}
