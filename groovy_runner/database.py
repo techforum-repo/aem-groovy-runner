@@ -205,6 +205,10 @@ def set_setting_overrides(values: dict[str, str]) -> None:
             )
 
 
-def clear_setting_overrides() -> None:
+def clear_setting_overrides(keys: list[str] | None = None) -> None:
+    """All overrides, or only `keys`."""
     with _connect() as conn:
-        conn.execute("DELETE FROM settings")
+        if keys is None:
+            conn.execute("DELETE FROM settings")
+        else:
+            conn.executemany("DELETE FROM settings WHERE key = ?", [(k,) for k in keys])

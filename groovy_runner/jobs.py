@@ -31,6 +31,7 @@ class RunJob:
     discoveries: list[runner.Discovery] = field(default_factory=list)
     combined: list[tuple[str, str]] = field(default_factory=list)  # batch mode: (entered path, combined file)
     lineage: list[str] = field(default_factory=list)  # earlier batch ids this run continues (Retry)
+    environment: str = ""  # the AEM environment it runs on ("" = mock)
     cancel: threading.Event = field(default_factory=threading.Event)
     started: float = field(default_factory=time.monotonic)
     current: str = ""  # label of the run in flight

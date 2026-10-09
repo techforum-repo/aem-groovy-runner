@@ -89,7 +89,7 @@ def test_ui_batch_run_and_combine(isolated):
     assert "/content/dam/projects" in at.text_area(key="skip_list:assets-by-type").value
     at.checkbox(key="batch_on:assets-by-type").check().run()
     button = [b for b in at.button if b.label.startswith("▶️")][0]
-    assert button.label == "▶️ Discover & run (1 path)"
+    assert button.label == "▶️ Discover & run (1 path · mock)"
     button.click().run()
     for _ in range(40):
         if "run_job" not in at.session_state:

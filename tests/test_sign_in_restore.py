@@ -33,7 +33,8 @@ def app_env(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "output_dir", str(tmp_path / "out"))
     settings_store._cache = None
     database.initialize()
-    settings_store.save({"mock_mode": False, "aem_author_url": AUTHOR})
+    settings_store.save({"mock_mode": False})
+    settings_store.save_environments([settings_store.Environment("DEV", AUTHOR)])
     yield kr
     keyring.set_keyring(previous)
     settings_store._cache = None
@@ -113,10 +114,9 @@ def test_remembered_sign_in_not_restored_for_remote_browsers(app_env, monkeypatc
 
 
 def test_changing_author_url_signs_out(app_env, monkeypatch):
+    """The token is never sent to a changed URL, however the URL was changed (e.g. another tab)."""
     at = _sign_in(monkeypatch)
-    at.sidebar.radio[0].set_value("Settings").run()
-    url_input = [t for t in at.text_input if t.label.startswith("AEM author URL")][0]
-    url_input.set_value("https://author-p8-e8.adobeaemcloud.com")
-    [b for b in at.button if b.label == "Save settings"][0].click().run()
+    settings_store.save_environments([settings_store.Environment("DEV", "https://author-p8-e8.adobeaemcloud.com")])
+    at.run()
     assert not _signed_in(at)
-    assert any("author URL changed" in w.value for w in at.sidebar.warning)
+    assert any("DEV's author URL changed" in w.value for w in at.sidebar.warning)
