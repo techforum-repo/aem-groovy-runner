@@ -25,9 +25,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
-from urllib.parse import urlparse
 
-from . import audit, database, formatters, readonly, settings_store
+from . import audit, database, formatters, readonly
 from .config import settings
 from .groovy_script import build_script, parse_output, split_payload
 from .logging_setup import get_logger
@@ -215,7 +214,9 @@ def run_script(
     batch_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     out_dir = session_dir(session_id) / script.id / batch_id
     out_dir.mkdir(parents=True, exist_ok=True)
-    aem_host = "mock" if settings_store.get("mock_mode") else (urlparse(settings_store.get("aem_author_url")).netloc or "?")
+    env = getattr(client, "environment", None)  # the AEM environment this client is bound to (None = mock)
+    aem_host = env.host if env is not None else "mock"
+    env_name = env.name if env is not None else "mock"
     template = script.template()
     template_sha = audit.sha256_text(template)
     results: list[GeneratedFile] = []
@@ -265,7 +266,8 @@ def run_script(
     runs = [r for r in all_runs if only_labels is None or r[0] in only_labels]
     used: set[str] = set()
     audit.log("run.batch_started", session_id=session_id, aem_user=aem_user, target=script.id, details={
-        "batch_id": batch_id, "aem_host": aem_host, "runs": [r[0] for r in runs], "inputs": values,
+        "batch_id": batch_id, "environment": env_name, "aem_host": aem_host, "runs": [r[0] for r in runs],
+        "inputs": values,
         "template_sha256": template_sha, "script_path": str(script.script_path)})
 
     for index, (label, slug, config) in enumerate(runs):

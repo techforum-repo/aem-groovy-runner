@@ -7,21 +7,24 @@ from typing import Any
 
 import httpx
 
-from .. import settings_store
 from ..auth import auth_headers
+from ..settings_store import Environment
 from ..user_token import UserToken
 
 
 class BaseAemClient:
-    def __init__(self, user_token: UserToken | None = None) -> None:
+    """Bound to one AEM environment for its whole life, so a batch keeps
+    talking to the server it started on even if you switch in the sidebar."""
+
+    def __init__(self, user_token: UserToken | None = None, environment: Environment | None = None) -> None:
         self._user_token = user_token
+        self.environment = environment
 
     @property
     def base_url(self) -> str:
-        url = settings_store.get("aem_author_url")
-        if not url:
-            raise RuntimeError("AEM is not configured — set the AEM author URL on the Settings page.")
-        return url
+        if self.environment is None or not self.environment.url:
+            raise RuntimeError("AEM is not configured — add an environment (name + author URL) on the Settings page.")
+        return self.environment.url
 
     def _new_http_client(self, timeout: float | None = None) -> httpx.Client:
         return httpx.Client(

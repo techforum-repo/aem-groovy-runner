@@ -13,8 +13,8 @@ from ..logging_setup import get_logger
 from ..scripts_registry import (InputDef, ScriptDef, batch_conflicts, discover, expand_runs, validate, validate_skips,
                                 with_skips)
 from ..utils import slug_for_path, split_lines, split_paths
-from .shared import (audit_event, download_button, get_client, is_auth_rejection, is_mock, multi_download_button,
-                     render_friendly_error, sign_out_rejected)
+from .shared import (active_environment, audit_event, download_button, get_client, is_auth_rejection, is_mock,
+                     multi_download_button, render_friendly_error, sign_out_rejected)
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -173,9 +173,20 @@ def _execute(script: ScriptDef, values: dict[str, Any], *, formatter_id: str | N
     # (and its earlier retries) plus the retried roots. A fresh run never borrows results from other runs.
     prior = ([f for f in st.session_state["session_files"] if f.ok and f.batch_id in lineage]
              if batch and lineage else None)
-    st.session_state["run_job"] = jobs.start(
-        get_client(), script, values, session_id=st.session_state["session_id"], formatter_id=formatter_id,
+    client = get_client()
+    job = jobs.start(
+        client, script, values, session_id=st.session_state["session_id"], formatter_id=formatter_id,
         only_labels=only_labels, total=total, batch=batch, prior_results=prior, lineage=lineage)
+    job.environment = _env_name(client)
+    st.session_state["run_job"] = job
+
+
+def _env_name(client: Any = None) -> str:
+    """The environment a run goes to ("" in mock mode)."""
+    if is_mock():
+        return ""
+    env = getattr(client, "environment", None) if client is not None else active_environment()
+    return env.name if env is not None else ""
 
 
 def _skips(script: ScriptDef) -> list[str]:
@@ -286,7 +297,7 @@ def _finalize(job: jobs.RunJob) -> None:
         outputs[(job.script_id, root, origin)] = path
     batch_id = job.results[0].batch_id if job.results else ""
     st.session_state["last_run"] = {"script_id": job.script_id, "values": job.values, "formatter_id": job.formatter_id,
-                                    "batch": job.batch, "batch_id": batch_id,
+                                    "batch": job.batch, "batch_id": batch_id, "environment": job.environment,
                                     "lineage": [*job.lineage, batch_id] if job.batch else []}
     st.session_state["format_selection"] = list(dict.fromkeys(
         key for f in job.results if f.ok
@@ -318,7 +329,8 @@ def _render_job_panel() -> None:
             text = job.current[0].upper() + job.current[1:] + "…"
         else:
             text = f"Running {min(job.finished + 1, job.total)}/{job.total}: {job.current or 'starting'}"
-        st.progress(fraction, text=f"{job.script_name}: {text}  ·  {job.elapsed:.0f}s")
+        where = f" on {job.environment}" if job.environment else ""
+        st.progress(fraction, text=f"{job.script_name}{where}: {text}  ·  {job.elapsed:.0f}s")
         if job.lines:
             st.markdown("\n".join(job.lines))
         c1, c2 = st.columns([1, 3])
@@ -433,7 +445,12 @@ def _render_session_files(scripts: dict[str, ScriptDef], links: dict[str, tuple[
     discovery_failed = any(f.label.endswith("(discovery)") for f in retryable)
     retry_label = ("Retry the whole batch (root discovery failed)" if discovery_failed
                    else f"Retry {len(retryable)} failed/cancelled run(s)")
-    if retryable and last["script_id"] in scripts and st.button(retry_label, disabled=_job_active()):
+    # A Retry goes to the environment the run went to, never to whichever is selected now.
+    other_env = (last or {}).get("environment", "") != _env_name()
+    if retryable and other_env:
+        retry_label += f" on {last.get('environment') or 'mock'}"
+        st.caption(f"⚠️ These runs went to **{last.get('environment') or 'mock'}**: switch to it in the sidebar to retry.")
+    if retryable and last["script_id"] in scripts and st.button(retry_label, disabled=_job_active() or other_env):
         _execute(scripts[last["script_id"]], last["values"], formatter_id=last.get("formatter_id"),
                  only_labels=None if discovery_failed else [f.label for f in retryable], batch=last.get("batch"),
                  lineage=last.get("lineage"))
@@ -585,8 +602,11 @@ def render() -> None:
     if _batch_settings(script, _values(script)) is not None:
         errors += batch_conflicts(script, _values(script))
     values = with_skips(script, _values(script), skips)  # what is sent and audited
-    if not is_mock() and not (settings_store.get("aem_author_url") and auth.is_signed_in(st.session_state.get("user_token"))):
-        errors.append("Not connected to AEM: set the author URL (Settings) and sign in with your account (sidebar)")
+    env = None if is_mock() else active_environment()
+    if not is_mock() and env is None:
+        errors.append("No AEM environment: add one (name + author URL) on the Settings page")
+    elif not is_mock() and not auth.is_signed_in(st.session_state.get("user_token")):
+        errors.append(f"Not signed in to {env.name}: sign in with your account in the sidebar")
     runs = expand_runs(script, values) if not script.problems else []
     link = formatter_links.link_for(script.id, links)
     linked = [fid for fid in link.formatters if fid in formatters.FORMATTERS]
@@ -608,8 +628,10 @@ def render() -> None:
     with c1:
         st.write("")
         batch = _batch_settings(script, values)
-        label = (f"▶️ Discover & run ({len(runs)} path{'s' if len(runs) != 1 else ''})" if batch
-                 else f"▶️ Run ({len(runs)} run{'s' if len(runs) != 1 else ''})")
+        on = f" on {env.name}" if env else ""
+        count = (f"{len(runs)} path{'s' if len(runs) != 1 else ''}" if batch
+                 else f"{len(runs)} run{'s' if len(runs) != 1 else ''}") + (" · mock" if is_mock() else "")
+        label = f"▶️ {'Discover & run' if batch else 'Run'}{on} ({count})"
         clicked = st.button(label, type="primary", disabled=bool(errors) or not runs or _job_active(), width="stretch")
     for err in errors:
         st.caption(f"⚠️ {err}")

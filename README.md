@@ -18,13 +18,37 @@ session's results into Excel → download.** Every step is audited.
 The app starts in **mock mode** with sample data, so you can try the whole
 flow straight away. To go live:
 
-1. **Settings**: set the AEM author URL and turn **Mock mode** off.
-2. **Sign in** (Settings page or sidebar): in Cloud Manager open the environment's
+1. **Settings**: add your AEM environments (a name such as DEV, QA or PROD,
+   and its author URL) and turn **Mock mode** off.
+2. **Pick the environment** in the sidebar, then **sign in** to it (sidebar or
+   Settings page): in Cloud Manager open that environment's
    **Developer Console** (you sign in with your usual SSO). Then go to
    **Integrations → Local token → Get Local Development Token**, copy it
    (the whole JSON is fine), and paste it into the Sign in box.
 3. **Diagnostics → Test connection**: it shows who you're signed in as and
    runs a one-line script.
+
+### Several environments
+
+Add as many AEM environments as you like on the **Settings** page (one row
+each: name + author URL). In the sidebar you just **pick the environment**:
+
+- It shows whether you're signed in to it (🟢 / ⚪) and, if not, the sign-in box.
+- **Each environment has its own sign-in**: signing in to QA doesn't touch
+  your DEV sign-in, and switching back and forth keeps both. Each needs a
+  token from *that* environment's Developer Console. "Remember" stores each
+  one separately in the OS keychain (keyed by the environment's host), and
+  signing out of one leaves the others signed in.
+- The **Run button names the environment** (**▶️ Run on QA (2 runs)**), and
+  the progress bar, History (`aem_host`) and audit trail record it.
+- A run that's in progress keeps using the environment it started on, even if
+  you switch in the sidebar. **Retry** always goes back to the run's own
+  environment: if you've switched since, it asks you to switch back.
+- If an environment's author URL is changed, its sign-in is dropped (a token
+  is never sent to a different server).
+- The sidebar preselects the environment you used last on this computer.
+- Upgrading from a single author URL: it becomes an environment named
+  **Default**; rename it or add more on the Settings page.
 
 ### Authentication: your own access only
 
@@ -64,7 +88,7 @@ technical account, service credentials, or basic auth.
 | Formatters | The formatter catalogue and the script ↔ formatter **links** grid |
 | History | All runs from every session; re-download earlier files, including combined files (one per entered path for batches) |
 | Audit | Append-only audit trail (filter + CSV export) and per-run traceability with a file-integrity check |
-| Settings | AEM author URL, mock mode, Groovy Console endpoint, timeout; how to sign in |
+| Settings | AEM environments (name + author URL), mock mode, Groovy Console endpoint, timeout; how to sign in |
 | Diagnostics | Connection test, log download |
 
 ## Scripts

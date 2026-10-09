@@ -4,6 +4,7 @@ from __future__ import annotations
 groovy_runner/ui/*. Page-specific rendering stays in that page's own module."""
 
 import base64
+import html
 import hashlib
 import json
 import uuid
@@ -46,7 +47,7 @@ def init_session_state() -> None:
             st.session_state[key] = value
     if new_session:
         audit.log("session.started", session_id=st.session_state["session_id"],
-                  details={"mock_mode": is_mock(), "aem_author_url": settings_store.get("aem_author_url")})
+                  details={"mock_mode": is_mock(), "environments": [e.name for e in settings_store.environments()]})
 
 
 def audit_event(action: str, **kwargs) -> None:
@@ -175,10 +176,68 @@ def is_mock() -> bool:
     return bool(settings_store.get("mock_mode"))
 
 
+# --- AEM environments: one picked in the sidebar, a separate sign-in each ------
+
+# The session keys that make up one environment's sign-in. The rest of the app
+# reads them as "the current sign-in"; switching environments swaps them.
+_SIGN_IN_KEYS = ("user_token", "aem_user", "_remembered", "_remember_error", "_sign_in_notice", "_sign_in_error",
+                 "_sign_in_url")  # the author URL the token was issued for
+
+
+def active_environment() -> settings_store.Environment | None:
+    """The environment picked in the sidebar (this browser session), else the
+    one used last on this machine, else the first configured."""
+    envs = settings_store.environments()
+    if not envs:
+        return None
+    names = [e.name for e in envs]
+    chosen = st.session_state.get("active_env")
+    if chosen not in names:
+        last = settings_store.last_environment()
+        chosen = last if last in names else names[0]
+        st.session_state["active_env"] = chosen
+    return envs[names.index(chosen)]
+
+
+def _sync_sign_in() -> None:
+    """Keep each environment's sign-in separate: when the selection changes,
+    park the current one and bring back the selected environment's."""
+    env = active_environment()
+    name = env.name if env else ""
+    current = st.session_state.get("_sign_in_env")
+    if current != name:
+        parked = st.session_state.setdefault("sign_ins", {})
+        if current is not None:
+            parked[current] = {k: st.session_state.get(k) for k in _SIGN_IN_KEYS}
+        restored = parked.pop(name, {})
+        st.session_state.update({k: restored.get(k) for k in _SIGN_IN_KEYS})
+        st.session_state["aem_user"] = st.session_state.get("aem_user") or ""
+        st.session_state["_sign_in_env"] = name
+    # A token belongs to one server: if this environment's URL changed since sign-in (here or in
+    # another tab), drop it rather than send it to the new URL.
+    signed_for = st.session_state.get("_sign_in_url")
+    if env is not None and st.session_state.get("user_token") is not None and signed_for and signed_for != env.url:
+        audit_event("auth.signed_out", aem_user=st.session_state.get("aem_user", ""),
+                    details={"reason": "environment URL changed", "environment": env.name, "from": signed_for,
+                             "to": env.url})
+        st.session_state.update({k: None for k in _SIGN_IN_KEYS})
+        st.session_state.update(aem_user="", _sign_in_notice=f"{env.name}'s author URL changed: sign in again.")
+        st.session_state.setdefault("_restore_tried", set()).discard(env.name)
+
+
+def forget_sign_in(env_name: str) -> None:
+    """Drop one environment's sign-in from this session (e.g. its URL changed)."""
+    st.session_state.setdefault("sign_ins", {}).pop(env_name, None)
+    st.session_state.setdefault("_restore_tried", set()).discard(env_name)
+    if st.session_state.get("_sign_in_env") == env_name:
+        st.session_state.update({k: None for k in _SIGN_IN_KEYS})
+        st.session_state["aem_user"] = ""
+
+
 def get_client() -> GroovyConsoleClient | MockGroovyConsoleClient:
     if is_mock():
         return MockGroovyConsoleClient()
-    return GroovyConsoleClient(user_token=st.session_state.get("user_token"))
+    return GroovyConsoleClient(user_token=st.session_state.get("user_token"), environment=active_environment())
 
 
 def is_local_client() -> bool:
@@ -197,15 +256,17 @@ def is_local_client() -> bool:
 
 
 def _try_restore() -> None:
-    """Reuse a remembered sign-in for the current author URL: once per
-    browser session per author URL, so a sign-out isn't immediately undone.
+    """Reuse a remembered sign-in for the selected environment: once per
+    browser session per environment, so a sign-out isn't immediately undone.
     Only for browsers on this machine (see is_local_client)."""
-    author = settings_store.get("aem_author_url")
-    if not author or st.session_state.get("_restore_tried_for") == author:
+    env = active_environment()
+    tried = st.session_state.setdefault("_restore_tried", set())
+    if env is None or env.name in tried or st.session_state.get("user_token") is not None:
         return
     if not is_local_client():
         return
-    st.session_state["_restore_tried_for"] = author
+    tried.add(env.name)
+    author = env.url
     remembered = token_store.load(author)
     if remembered is None:
         return
@@ -213,7 +274,7 @@ def _try_restore() -> None:
     note = ""
     if not is_mock():
         try:
-            aem_user = GroovyConsoleClient(user_token=token).current_user()
+            aem_user = GroovyConsoleClient(user_token=token, environment=env).current_user()
         except Exception as exc:
             if is_auth_rejection(exc):
                 token_store.delete(author)
@@ -223,10 +284,11 @@ def _try_restore() -> None:
                 return
             # AEM unreachable (VPN off, network): keep the sign-in; runs will report the real error.
             note = f"couldn't confirm with AEM: {str(exc)[:120]}"
-    st.session_state.update(user_token=token, aem_user=aem_user, _remembered=True)
+    st.session_state.update(user_token=token, aem_user=aem_user, _remembered=True, _sign_in_url=author)
     audit_event("auth.restored", aem_user=aem_user, target=aem_user, details={
         "source": "os-keychain", "expires_at": token.expires_label, "token_fingerprint": token.fingerprint,
-        "aem_author_url": author, "verified_with_aem": not note and not is_mock(), "note": note})
+        "environment": env.name, "aem_author_url": author, "verified_with_aem": not note and not is_mock(),
+        "note": note})
 
 
 def is_auth_rejection(exc: BaseException) -> bool:
@@ -238,23 +300,30 @@ def is_auth_rejection(exc: BaseException) -> bool:
 def sign_out_rejected(reason: str) -> None:
     """Called when AEM rejects the token mid-session: forget it everywhere so
     the sign-in box comes back, with the reason shown there."""
-    token_store.delete(settings_store.get("aem_author_url"))
+    env = active_environment()
+    if env is not None:
+        token_store.delete(env.url)
     audit_event("auth.signed_out", aem_user=st.session_state.get("aem_user", ""),
-                target=st.session_state.get("aem_user", ""), status="error", details={"reason": reason[:300]})
+                target=st.session_state.get("aem_user", ""), status="error",
+                details={"reason": reason[:300], "environment": env.name if env else ""})
     st.session_state.update(user_token=None, aem_user="", _remembered=False, _sign_in_notice=reason)
 
 
 def _sign_in(raw: str, remember: bool) -> None:
+    env = active_environment()
     try:
+        if env is None:
+            raise RuntimeError("Add an AEM environment on the Settings page first.")
         token = user_token.parse(raw)
         if token.is_expired():
             raise ValueError(f"Your Local Development Token expired at {token.expires_label} — get a new one.")
-        aem_user = GroovyConsoleClient(user_token=token).current_user()
+        aem_user = GroovyConsoleClient(user_token=token, environment=env).current_user()
     except Exception as exc:
         st.session_state["_sign_in_error"] = exc
-        audit_event("auth.sign_in_failed", status="error", details={"error": str(exc)[:300]})
+        audit_event("auth.sign_in_failed", status="error",
+                    details={"error": str(exc)[:300], "environment": env.name if env else ""})
         return
-    author = settings_store.get("aem_author_url")
+    author = env.url
     remembered, remember_error = False, ""
     if remember:
         try:
@@ -265,25 +334,28 @@ def _sign_in(raw: str, remember: bool) -> None:
     else:
         token_store.delete(author)  # don't leave an older remembered token behind
     st.session_state.update(user_token=token, aem_user=aem_user, _sign_in_error=None, _remembered=remembered,
-                            _remember_error=remember_error, _sign_in_notice=None)
+                            _remember_error=remember_error, _sign_in_notice=None, _sign_in_url=author)
     for key in [k for k in st.session_state if str(k).startswith("_token_input")]:
         st.session_state[key] = ""
     audit_event("auth.signed_in", aem_user=aem_user, target=aem_user, details={
         "ims_user_id": token.user_id, "ims_client_id": token.client_id, "expires_at": token.expires_label,
-        "token_fingerprint": token.fingerprint, "aem_author_url": author,
+        "token_fingerprint": token.fingerprint, "environment": env.name, "aem_author_url": author,
         "remembered_in_os_keychain": remembered, "remember_error": remember_error})
 
 
 def _sign_out() -> None:
-    forgotten = token_store.delete(settings_store.get("aem_author_url"))
+    env = active_environment()
+    forgotten = token_store.delete(env.url) if env else False
     audit_event("auth.signed_out", aem_user=st.session_state.get("aem_user", ""),
-                target=st.session_state.get("aem_user", ""), details={"removed_from_os_keychain": forgotten})
+                target=st.session_state.get("aem_user", ""),
+                details={"removed_from_os_keychain": forgotten, "environment": env.name if env else ""})
     st.session_state.update(user_token=None, aem_user="", _remembered=False)
 
 
 def render_user_sign_in(where: str = "sidebar") -> None:
     """Sign-in panel; shown in the sidebar on every page and on the Settings
     page. `where` keeps the two copies' widget keys distinct."""
+    _sync_sign_in()
     _try_restore()
     token: user_token.UserToken | None = st.session_state.get("user_token")
     if token is not None:
@@ -335,6 +407,31 @@ def render_user_sign_in(where: str = "sidebar") -> None:
         render_friendly_error(st.session_state["_sign_in_error"], key=f"sign_in_err_{where}", retry=False)
 
 
+def _on_environment_change() -> None:
+    settings_store.remember_last_environment(st.session_state.get("active_env", ""))
+    _sync_sign_in()
+
+
+def render_environment_picker() -> None:
+    """Sidebar: pick the server, see whether you're signed in to it, sign in if not."""
+    envs = settings_store.environments()
+    if not envs:
+        st.warning("Add an AEM environment (name + author URL) on the Settings page.")
+        return
+    active_environment()  # makes sure the selection is a valid environment before the widget renders
+    st.selectbox("AEM environment", [e.name for e in envs], key="active_env", on_change=_on_environment_change,
+                 help="Each environment has its own sign-in. A run already in progress keeps using the "
+                      "environment it started on.")
+    _sync_sign_in()
+    _try_restore()
+    env = active_environment()
+    token = st.session_state.get("user_token")
+    signed_in = token is not None and not token.is_expired()
+    st.markdown(f"<span class='badge'>{'🟢 Signed in' if signed_in else '⚪ Not signed in'}</span> "
+                f"&nbsp;{html.escape(env.host)}", unsafe_allow_html=True)
+    render_user_sign_in("sidebar")
+
+
 def render_sidebar() -> str:
     with st.sidebar:
         st.markdown("## ⚙️ AEM Groovy Runner")
@@ -348,13 +445,7 @@ def render_sidebar() -> str:
             st.markdown("<span class='badge'>Mock / demo data</span>", unsafe_allow_html=True)
             st.caption("Turn off Mock mode on the Settings page once AEM is configured.")
         else:
-            st.markdown("<span class='badge'>Live</span>", unsafe_allow_html=True)
-            url = settings_store.get("aem_author_url")
-            st.caption("Author: **" + (url.replace("https://", "") if url else "(not set)") + "**")
-            if not url:
-                st.warning("Set the AEM author URL on the Settings page.")
-            else:
-                render_user_sign_in("sidebar")
+            render_environment_picker()
     return page
 
 
