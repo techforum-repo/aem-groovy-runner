@@ -1,3 +1,5 @@
+> **This repository has moved.** It now lives in [`martech-architect-toolkit/aem-groovy-runner`](https://github.com/techforum-repo/martech-architect-toolkit/tree/main/aem-groovy-runner), with its full commit history. This repo is archived and read-only.
+
 # AEM Groovy Runner
 
 A Streamlit app that runs Groovy scripts on AEM as a Cloud Service through the
